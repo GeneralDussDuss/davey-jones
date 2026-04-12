@@ -1,15 +1,22 @@
 /*
- * nesso_ui.c — LVGL dashboard + deauth attack mode for DAVEY JONES.
+ * nesso_ui.c — DAVEY JONES full menu system.
  *
- * Views:
- *   DASH  — live counters (APs, beacons, PMKIDs, channel, USB)
- *   APS   — top APs by RSSI with cursor selection + deauth trigger
- *   LORA  — placeholder
+ * Screen hierarchy:
+ *   SPLASH → (double-tap/any key) → MAIN MENU
+ *     ├── WiFi
+ *     │   ├── Scan (runs scan + shows results)
+ *     │   ├── AP List (wardrive results, scrollable)
+ *     │   ├── Deauth (select target → attack screen)
+ *     │   └── Beacon Spam (broadcast fake APs)
+ *     ├── Sub-GHz (placeholder)
+ *     ├── IR (placeholder)
+ *     └── Settings (placeholder)
  *
- * Button mapping:
- *   DASH/LORA: KEY2 = next view
- *   APS:       KEY2 = scroll cursor down, KEY1 = deauth selected AP
- *   ANY:       KEY1 long-press = stop active deauth
+ * Controls:
+ *   KEY1 = scroll down / select
+ *   KEY2 = back / secondary action
+ *   Double-tap screen = select (on menus) / start attack (on AP list)
+ *   Long-press KEY1 = back to main menu (from anywhere)
  */
 
 #include <stdio.h>
@@ -36,7 +43,7 @@
 
 static const char *TAG = "nesso_ui";
 
-/* -------------------- Palette D (RGB565-exact) -------------------- */
+/* -------------------- Palette -------------------- */
 
 #define COL_BLACK   lv_color_hex(0x000000)
 #define COL_CYAN    lv_color_hex(0x00FFFF)
@@ -44,601 +51,692 @@ static const char *TAG = "nesso_ui";
 #define COL_YELLOW  lv_color_hex(0xFFFF00)
 #define COL_WHITE   lv_color_hex(0xFFFFFF)
 #define COL_RED     lv_color_hex(0xFF0000)
+#define COL_GREEN   lv_color_hex(0x00FF00)
 
-/* -------------------- module state -------------------- */
+/* -------------------- UI state machine -------------------- */
+
+typedef enum {
+    UI_SPLASH,
+    UI_MAIN_MENU,
+    UI_WIFI_MENU,
+    UI_WIFI_SCANNING,
+    UI_WIFI_AP_LIST,
+    UI_WIFI_DEAUTH_SELECT,
+    UI_WIFI_DEAUTH_ACTIVE,
+    UI_WIFI_BEACON_SPAM,
+    UI_SUBGHZ_MENU,
+    UI_IR_MENU,
+} ui_state_t;
 
 static bool              s_up            = false;
 static lv_display_t     *s_disp          = NULL;
-static nesso_ui_view_t   s_view          = NESSO_UI_VIEW_DASH;
+static ui_state_t        s_state         = UI_SPLASH;
+static lv_timer_t       *s_refresh_timer = NULL;
+static TaskHandle_t      s_button_task   = NULL;
 
-/* Dash view widgets */
-static lv_obj_t *s_dash_scr        = NULL;
-static lv_obj_t *s_title_label     = NULL;
-static lv_obj_t *s_chan_label      = NULL;
-static lv_obj_t *s_aps_label       = NULL;
-static lv_obj_t *s_beacon_label    = NULL;
-static lv_obj_t *s_pmkid_label     = NULL;
-static lv_obj_t *s_power_label     = NULL;
-static lv_obj_t *s_dash_view_label = NULL;
+/* Touch */
+static esp_lcd_touch_handle_t s_touch = NULL;
+static lv_indev_t            *s_touch_indev = NULL;
 
-/* APS view */
-static lv_obj_t *s_aps_scr         = NULL;
-#define APS_VIEW_ROWS 8
-static lv_obj_t *s_ap_rows[APS_VIEW_ROWS];
-static lv_obj_t *s_aps_status_label = NULL;
-static lv_obj_t *s_aps_view_label   = NULL;
-static int       s_aps_cursor       = 0;
+/* Current screen object — rebuilt on each state change. */
+static lv_obj_t *s_screen = NULL;
 
-/* AP snapshot for the APS view. Refreshed periodically. */
-static nesso_wardrive_ap_t s_ap_snap[APS_VIEW_ROWS];
+/* Shared state for AP views. */
+#define AP_VIEW_ROWS 8
+static nesso_wardrive_ap_t s_ap_snap[16];
 static size_t              s_ap_snap_count = 0;
+static int                 s_cursor        = 0;
 
-/* Deauth attack state */
+/* Deauth state */
 static bool     s_deauth_active   = false;
 static uint8_t  s_deauth_bssid[6] = {0};
 static uint8_t  s_deauth_channel  = 0;
 static char     s_deauth_ssid[33] = {0};
 static uint32_t s_deauth_sent     = 0;
 static lv_timer_t *s_deauth_timer = NULL;
+static uint32_t s_atk_start_ms    = 0;
 
-/* Attack detail view */
-static lv_obj_t *s_atk_scr          = NULL;
-static lv_obj_t *s_atk_title        = NULL;
-static lv_obj_t *s_atk_ssid         = NULL;
-static lv_obj_t *s_atk_bssid        = NULL;
-static lv_obj_t *s_atk_info         = NULL;
-static lv_obj_t *s_atk_frames       = NULL;
-static lv_obj_t *s_atk_pmkid        = NULL;
-static lv_obj_t *s_atk_time         = NULL;
-static lv_obj_t *s_atk_hint         = NULL;
-static uint32_t  s_atk_start_ms     = 0;
+/* Screen-specific labels (set during build, refreshed by timer). */
+static lv_obj_t *s_dyn_labels[12];
+static int       s_dyn_count = 0;
 
-/* LORA view */
-static lv_obj_t *s_lora_scr = NULL;
+/* Deferred navigation from touch callbacks. */
+static ui_state_t s_pending_nav = UI_SPLASH;
+static bool       s_has_pending = false;
 
-static lv_timer_t   *s_refresh_timer = NULL;
-static TaskHandle_t  s_button_task   = NULL;
+/* Beacon spam SSIDs. */
+static const char *s_spam_list[] = {
+    "FBI Surveillance Van",
+    "NSA_Field_Office_4",
+    "CIA Black Site WiFi",
+    "DEA Task Force",
+    "GCHQ Mobile Unit",
+    "MI6 Undercover Net",
+    "Interpol Stakeout",
+    "Secret Service USSS",
+    "Area 51 Guest WiFi",
+    "Witness Protection",
+    "Totally Not A Cop",
+    "Free Candy Van WiFi",
+};
+#define SPAM_COUNT (sizeof(s_spam_list) / sizeof(s_spam_list[0]))
 
-/* Deferred view switch — set from touch callbacks, applied on next refresh. */
-static nesso_ui_view_t s_pending_view = NESSO_UI_VIEW_COUNT;
+/* -------------------- helpers -------------------- */
 
-/* Touch */
-static esp_lcd_touch_handle_t s_touch = NULL;
-static lv_indev_t            *s_touch_indev = NULL;
-
-/* -------------------- widget helpers -------------------- */
-
-static lv_obj_t *make_row_label(lv_obj_t *parent, int y, lv_color_t color,
-                                 const char *text)
+static lv_obj_t *make_label(lv_obj_t *parent, int y, lv_color_t color,
+                             const char *text)
 {
     lv_obj_t *lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
     lv_obj_set_style_text_color(lbl, color, 0);
-    lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 4, y);
+    lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 6, y);
     return lbl;
 }
 
-/* -------------------- dashboard screen -------------------- */
-
-static void build_dash_screen(void)
+/* Track a label for dynamic refresh. */
+static void track(lv_obj_t *lbl)
 {
-    s_dash_scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_dash_scr, COL_BLACK, 0);
-    lv_obj_set_style_bg_opa  (s_dash_scr, LV_OPA_COVER, 0);
-
-    s_title_label = lv_label_create(s_dash_scr);
-    lv_label_set_text(s_title_label, "DAVEY JONES");
-    lv_obj_set_style_text_color(s_title_label, COL_MAGENTA, 0);
-    lv_obj_align(s_title_label, LV_ALIGN_TOP_MID, 0, 4);
-
-    int y = 28;
-    s_chan_label    = make_row_label(s_dash_scr, y, COL_CYAN,  "CH   --"); y += 22;
-    s_aps_label    = make_row_label(s_dash_scr, y, COL_CYAN,  "APs  0");  y += 22;
-    s_beacon_label = make_row_label(s_dash_scr, y, COL_CYAN,  "BCN  0");  y += 22;
-    s_pmkid_label  = make_row_label(s_dash_scr, y, COL_YELLOW,"PMK  0");  y += 22;
-    s_power_label  = make_row_label(s_dash_scr, y, COL_CYAN,  "USB  ?");
-
-    s_dash_view_label = lv_label_create(s_dash_scr);
-    lv_obj_set_style_text_color(s_dash_view_label, COL_WHITE, 0);
-    lv_label_set_text(s_dash_view_label, "[1/3] DASH");
-    lv_obj_align(s_dash_view_label, LV_ALIGN_BOTTOM_MID, 0, -4);
+    if (s_dyn_count < 12) s_dyn_labels[s_dyn_count++] = lbl;
 }
 
-/* Forward declarations for deauth (defined below APS view). */
-static void start_deauth(int ap_index);
-static void stop_deauth(void);
-
-/* -------------------- APS view (target selection + deauth) -------------------- */
-
-/* Double-tap detection for touch deauth. */
-static uint32_t s_last_tap_ms = 0;
-#define DOUBLE_TAP_MS 500
-
-static void aps_screen_tapped(lv_event_t *e)
-{
-    (void)e;
-    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
-    if (s_last_tap_ms && (now - s_last_tap_ms) < DOUBLE_TAP_MS) {
-        /* Double tap — start deauth + defer switch to attack view.
-         * Can't call lv_scr_load directly from an LVGL event callback
-         * reliably — defer to the next refresh tick. */
-        if (s_deauth_active) {
-            stop_deauth();
-        } else if (s_ap_snap_count > 0) {
-            start_deauth(s_aps_cursor);
-            s_pending_view = NESSO_UI_VIEW_ATTACK;
-        }
-        s_last_tap_ms = 0;
-    } else {
-        s_last_tap_ms = now;
-    }
-}
-
-static void build_aps_screen(void)
-{
-    s_aps_scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_aps_scr, COL_BLACK, 0);
-    lv_obj_set_style_bg_opa  (s_aps_scr, LV_OPA_COVER, 0);
-    /* Full-screen touch target for double-tap deauth. */
-    lv_obj_add_flag(s_aps_scr, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_aps_scr, aps_screen_tapped, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *title = lv_label_create(s_aps_scr);
-    lv_label_set_text(title, "SELECT TARGET");
-    lv_obj_set_style_text_color(title, COL_MAGENTA, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
-
-    /* 8 rows for AP entries. */
-    for (int i = 0; i < APS_VIEW_ROWS; ++i) {
-        s_ap_rows[i] = lv_label_create(s_aps_scr);
-        lv_label_set_text(s_ap_rows[i], "");
-        lv_obj_set_style_text_color(s_ap_rows[i], COL_CYAN, 0);
-        lv_obj_align(s_ap_rows[i], LV_ALIGN_TOP_LEFT, 4, 20 + i * 22);
-    }
-
-    /* Status bar at bottom */
-    s_aps_status_label = lv_label_create(s_aps_scr);
-    lv_label_set_text(s_aps_status_label, "KEY2:scroll KEY1:deauth");
-    lv_obj_set_style_text_color(s_aps_status_label, COL_WHITE, 0);
-    lv_obj_align(s_aps_status_label, LV_ALIGN_BOTTOM_MID, 0, -18);
-
-    s_aps_view_label = lv_label_create(s_aps_scr);
-    lv_label_set_text(s_aps_view_label, "[2/3] APS");
-    lv_obj_set_style_text_color(s_aps_view_label, COL_WHITE, 0);
-    lv_obj_align(s_aps_view_label, LV_ALIGN_BOTTOM_MID, 0, -4);
-}
-
-/* Sort APs by RSSI descending (strongest first). Simple insertion sort. */
 static void sort_aps_by_rssi(nesso_wardrive_ap_t *aps, size_t n)
 {
     for (size_t i = 1; i < n; ++i) {
         nesso_wardrive_ap_t tmp = aps[i];
         size_t j = i;
-        while (j > 0 && aps[j - 1].rssi_peak < tmp.rssi_peak) {
-            aps[j] = aps[j - 1];
-            --j;
+        while (j > 0 && aps[j-1].rssi_peak < tmp.rssi_peak) {
+            aps[j] = aps[j-1]; --j;
         }
         aps[j] = tmp;
     }
 }
 
-static void refresh_aps_view(void)
+static void refresh_ap_snapshot(void)
 {
-    nesso_wardrive_ap_t all[16];
-    size_t count = 0;
-    nesso_wardrive_snapshot(all, 16, &count);
-    sort_aps_by_rssi(all, count);
-
-    s_ap_snap_count = count < APS_VIEW_ROWS ? count : APS_VIEW_ROWS;
-    memcpy(s_ap_snap, all, s_ap_snap_count * sizeof(s_ap_snap[0]));
-
-    if (s_aps_cursor >= (int)s_ap_snap_count) {
-        s_aps_cursor = s_ap_snap_count > 0 ? (int)s_ap_snap_count - 1 : 0;
-    }
-
-    for (int i = 0; i < APS_VIEW_ROWS; ++i) {
-        if ((size_t)i < s_ap_snap_count) {
-            const nesso_wardrive_ap_t *ap = &s_ap_snap[i];
-            bool is_cursor = (i == s_aps_cursor);
-            bool is_target = s_deauth_active &&
-                memcmp(ap->bssid, s_deauth_bssid, 6) == 0;
-
-            /* Build display name. */
-            char name[20];
-            if (ap->ssid[0]) {
-                /* Highlighted row shows full name, others truncated. */
-                int max_chars = is_cursor ? 18 : 10;
-                snprintf(name, sizeof(name), "%.*s", max_chars, ap->ssid);
-            } else {
-                snprintf(name, sizeof(name), "%02X:%02X:%02X",
-                         ap->bssid[3], ap->bssid[4], ap->bssid[5]);
-            }
-
-            char row[40];
-            if (is_cursor) {
-                /* Highlighted: show full info with auth type. */
-                snprintf(row, sizeof(row), ">%.18s", name);
-            } else {
-                /* Normal: compact. Auth prefix + name + rssi. */
-                const char *auth = ap->auth[0] ? ap->auth : "?";
-                snprintf(row, sizeof(row), "%-4s %-10s %3d",
-                         auth, name, ap->rssi_peak);
-            }
-            lv_label_set_text(s_ap_rows[i], row);
-
-            lv_color_t color;
-            if (is_target) color = COL_RED;
-            else if (is_cursor) color = COL_YELLOW;
-            else color = COL_CYAN;
-            lv_obj_set_style_text_color(s_ap_rows[i], color, 0);
-        } else {
-            lv_label_set_text(s_ap_rows[i], "");
-        }
-    }
-
-    /* Status bar — shows attack status or highlighted AP details. */
-    if (s_deauth_active) {
-        char status[64];
-        snprintf(status, sizeof(status), "DEAUTH x%lu ch%u",
-                 (unsigned long)s_deauth_sent, s_deauth_channel);
-        lv_label_set_text(s_aps_status_label, status);
-        lv_obj_set_style_text_color(s_aps_status_label, COL_RED, 0);
-    } else if (s_ap_snap_count > 0 && s_aps_cursor < (int)s_ap_snap_count) {
-        const nesso_wardrive_ap_t *sel = &s_ap_snap[s_aps_cursor];
-        char info[40];
-        snprintf(info, sizeof(info), "%s ch%u %ddBm",
-                 sel->auth[0] ? sel->auth : "?",
-                 sel->primary_channel, sel->rssi_peak);
-        lv_label_set_text(s_aps_status_label, info);
-        lv_obj_set_style_text_color(s_aps_status_label, COL_YELLOW, 0);
-    } else {
-        lv_label_set_text(s_aps_status_label, "btn:scroll 2xtap:atk");
-        lv_obj_set_style_text_color(s_aps_status_label, COL_WHITE, 0);
-    }
+    nesso_wardrive_snapshot(s_ap_snap, 16, &s_ap_snap_count);
+    sort_aps_by_rssi(s_ap_snap, s_ap_snap_count);
+    if (s_cursor >= (int)s_ap_snap_count)
+        s_cursor = s_ap_snap_count > 0 ? (int)s_ap_snap_count - 1 : 0;
 }
 
-/* -------------------- ATTACK detail view -------------------- */
-
-static void build_attack_screen(void)
-{
-    s_atk_scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_atk_scr, COL_BLACK, 0);
-    lv_obj_set_style_bg_opa  (s_atk_scr, LV_OPA_COVER, 0);
-
-    s_atk_title = lv_label_create(s_atk_scr);
-    lv_label_set_text(s_atk_title, "DEAUTH");
-    lv_obj_set_style_text_color(s_atk_title, COL_RED, 0);
-    lv_obj_align(s_atk_title, LV_ALIGN_TOP_MID, 0, 4);
-
-    int y = 28;
-    /* Target info */
-    lv_obj_t *tgt = make_row_label(s_atk_scr, y, COL_WHITE, "TARGET"); y += 18;
-    (void)tgt;
-
-    s_atk_ssid = make_row_label(s_atk_scr, y, COL_YELLOW, "---"); y += 18;
-    s_atk_bssid = make_row_label(s_atk_scr, y, COL_CYAN, "---"); y += 18;
-    s_atk_info = make_row_label(s_atk_scr, y, COL_CYAN, "---"); y += 24;
-
-    /* Attack stats */
-    lv_obj_t *atk = make_row_label(s_atk_scr, y, COL_WHITE, "ATTACK"); y += 18;
-    (void)atk;
-
-    s_atk_frames = make_row_label(s_atk_scr, y, COL_RED, "Frames: 0"); y += 18;
-    s_atk_pmkid = make_row_label(s_atk_scr, y, COL_YELLOW, "PMKIDs: 0"); y += 18;
-    s_atk_time = make_row_label(s_atk_scr, y, COL_CYAN, "Time: 0:00"); y += 22;
-
-    s_atk_hint = lv_label_create(s_atk_scr);
-    lv_label_set_text(s_atk_hint, "KEY1:stop  KEY2:back");
-    lv_obj_set_style_text_color(s_atk_hint, COL_WHITE, 0);
-    lv_obj_align(s_atk_hint, LV_ALIGN_BOTTOM_MID, 0, -4);
-}
-
-static void update_attack_screen(void)
-{
-    if (!s_deauth_active) {
-        lv_label_set_text(s_atk_title, "DEAUTH STOPPED");
-        lv_obj_set_style_text_color(s_atk_title, COL_WHITE, 0);
-        lv_label_set_text(s_atk_hint, "KEY2:back to targets");
-        return;
-    }
-
-    /* Blink title */
-    static bool blink = false;
-    blink = !blink;
-    lv_label_set_text(s_atk_title, blink ? ">> DEAUTH <<" : "   DEAUTH   ");
-    lv_obj_set_style_text_color(s_atk_title, blink ? COL_RED : COL_MAGENTA, 0);
-
-    /* Target details */
-    if (s_deauth_ssid[0]) {
-        lv_label_set_text(s_atk_ssid, s_deauth_ssid);
-    } else {
-        char mac[20];
-        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 s_deauth_bssid[0], s_deauth_bssid[1], s_deauth_bssid[2],
-                 s_deauth_bssid[3], s_deauth_bssid[4], s_deauth_bssid[5]);
-        lv_label_set_text(s_atk_ssid, mac);
-    }
-
-    char bssid_str[20];
-    snprintf(bssid_str, sizeof(bssid_str), "%02X:%02X:%02X:%02X:%02X:%02X",
-             s_deauth_bssid[0], s_deauth_bssid[1], s_deauth_bssid[2],
-             s_deauth_bssid[3], s_deauth_bssid[4], s_deauth_bssid[5]);
-    lv_label_set_text(s_atk_bssid, bssid_str);
-
-    char info[24];
-    snprintf(info, sizeof(info), "ch%u  %ddBm",
-             s_deauth_channel, (int)s_ap_snap[s_aps_cursor].rssi_peak);
-    lv_label_set_text(s_atk_info, info);
-
-    /* Counters */
-    lv_label_set_text_fmt(s_atk_frames, "Frames: %lu",
-                          (unsigned long)s_deauth_sent);
-
-    nesso_eapol_status_t es = {0};
-    nesso_eapol_status(&es);
-    lv_label_set_text_fmt(s_atk_pmkid, "PMKIDs: %lu",
-                          (unsigned long)es.pmkids_captured);
-
-    /* Timer */
-    uint32_t elapsed_s = (uint32_t)((esp_timer_get_time() / 1000000ULL)) -
-                         (s_atk_start_ms / 1000);
-    uint32_t mins = elapsed_s / 60;
-    uint32_t secs = elapsed_s % 60;
-    lv_label_set_text_fmt(s_atk_time, "Time: %lu:%02lu",
-                          (unsigned long)mins, (unsigned long)secs);
-}
-
-/* -------------------- LORA view -------------------- */
-
-static void build_lora_screen(void)
-{
-    s_lora_scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_lora_scr, COL_BLACK, 0);
-    lv_obj_set_style_bg_opa  (s_lora_scr, LV_OPA_COVER, 0);
-
-    lv_obj_t *t = lv_label_create(s_lora_scr);
-    lv_label_set_text(t, "LORA\n(soon)");
-    lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
-    lv_obj_center(t);
-
-    lv_obj_t *v = lv_label_create(s_lora_scr);
-    lv_label_set_text(v, "[3/3] LORA");
-    lv_obj_set_style_text_color(v, COL_WHITE, 0);
-    lv_obj_align(v, LV_ALIGN_BOTTOM_MID, 0, -4);
-}
-
-/* -------------------- deauth attack -------------------- */
+/* -------------------- deauth control -------------------- */
 
 static void deauth_timer_cb(lv_timer_t *t)
 {
     (void)t;
     if (!s_deauth_active) return;
-
-    /* Send a burst of 10 deauth frames every 2 seconds. */
     esp_err_t err = nesso_wifi_send_deauth(s_deauth_bssid, NULL, 7, 10);
     if (err == ESP_OK) {
         s_deauth_sent += 10;
-        /* Blink LED on each burst so there's physical feedback. */
-        static bool led_state = false;
-        led_state = !led_state;
-        nesso_led(led_state);
-    } else {
-        ESP_LOGW(TAG, "deauth tx failed: %s", esp_err_to_name(err));
+        static bool led = false;
+        led = !led;
+        nesso_led(led);
     }
 }
 
-static void start_deauth(int ap_index)
+static void start_deauth(int idx)
 {
-    if ((size_t)ap_index >= s_ap_snap_count) return;
-    if (s_deauth_active) return;  /* already running */
-
-    const nesso_wardrive_ap_t *ap = &s_ap_snap[ap_index];
+    if ((size_t)idx >= s_ap_snap_count || s_deauth_active) return;
+    const nesso_wardrive_ap_t *ap = &s_ap_snap[idx];
     memcpy(s_deauth_bssid, ap->bssid, 6);
     s_deauth_channel = ap->primary_channel;
     memcpy(s_deauth_ssid, ap->ssid, sizeof(s_deauth_ssid));
     s_deauth_sent = 0;
-
-    /* Lock channel so we stay on target's channel for PMKID capture. */
-    nesso_wardrive_lock_channel(s_deauth_channel);
-
-    /* Initial burst. */
-    nesso_wifi_send_deauth(s_deauth_bssid, NULL, 7, 20);
-    s_deauth_sent = 20;
-
-    /* Repeating burst every 2 seconds via LVGL timer (runs inside the
-     * LVGL task so we don't need a separate FreeRTOS task). */
-    s_deauth_timer = lv_timer_create(deauth_timer_cb, 2000, NULL);
-    s_deauth_active = true;
     s_atk_start_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
-    ESP_LOGI(TAG, "DEAUTH started: %s ch=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x",
-             s_deauth_ssid, s_deauth_channel,
-             s_deauth_bssid[0], s_deauth_bssid[1], s_deauth_bssid[2],
-             s_deauth_bssid[3], s_deauth_bssid[4], s_deauth_bssid[5]);
+    nesso_wardrive_lock_channel(s_deauth_channel);
+    nesso_wifi_send_deauth(s_deauth_bssid, NULL, 7, 20);
+    s_deauth_sent = 20;
+    s_deauth_timer = lv_timer_create(deauth_timer_cb, 2000, NULL);
+    s_deauth_active = true;
 }
 
 static void stop_deauth(void)
 {
     if (!s_deauth_active) return;
-
-    if (s_deauth_timer) {
-        lv_timer_del(s_deauth_timer);
-        s_deauth_timer = NULL;
-    }
+    if (s_deauth_timer) { lv_timer_del(s_deauth_timer); s_deauth_timer = NULL; }
     s_deauth_active = false;
-    nesso_led(false);  /* LED off when attack stops */
-
-    /* Resume normal channel hopping. */
+    nesso_led(false);
     nesso_wardrive_lock_channel(0);
-
-    ESP_LOGI(TAG, "DEAUTH stopped: sent %lu frames to %s",
-             (unsigned long)s_deauth_sent, s_deauth_ssid);
 }
 
-/* -------------------- live refresh timer -------------------- */
+/* -------------------- touch callbacks -------------------- */
+
+static void splash_tapped(lv_event_t *e)
+{
+    (void)e;
+    s_has_pending = true;
+    s_pending_nav = UI_MAIN_MENU;
+}
+
+static uint32_t s_last_deauth_tap = 0;
+static void deauth_select_tapped(lv_event_t *e)
+{
+    (void)e;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if (s_last_deauth_tap && (now - s_last_deauth_tap) < 500) {
+        if (s_ap_snap_count > 0 && !s_deauth_active) {
+            start_deauth(s_cursor);
+            s_has_pending = true;
+            s_pending_nav = UI_WIFI_DEAUTH_ACTIVE;
+        }
+        s_last_deauth_tap = 0;
+    } else {
+        s_last_deauth_tap = now;
+    }
+}
+
+/* -------------------- screen builders -------------------- */
+
+static void navigate(ui_state_t state);
+
+/* Splash */
+static void build_splash(void)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+
+    lv_obj_t *title = lv_label_create(s_screen);
+    lv_label_set_text(title, "DAVEY\nJONES");
+    lv_obj_set_style_text_color(title, COL_MAGENTA, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -20);
+
+    lv_obj_t *sub = lv_label_create(s_screen);
+    lv_label_set_text(sub, "tap to start");
+    lv_obj_set_style_text_color(sub, COL_CYAN, 0);
+    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 30);
+
+    /* Tap anywhere to proceed. */
+    lv_obj_add_flag(s_screen, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_screen, splash_tapped, LV_EVENT_CLICKED, NULL);
+}
+
+/* Menu item builder helper. */
+typedef struct { const char *label; ui_state_t target; } menu_item_t;
+
+static void build_menu(const char *title, const menu_item_t *items, int count)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+
+    lv_obj_t *t = lv_label_create(s_screen);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 4);
+
+    s_cursor = 0;
+    s_dyn_count = 0;
+    for (int i = 0; i < count && i < 10; ++i) {
+        lv_obj_t *row = make_label(s_screen, 28 + i * 22,
+                                    i == 0 ? COL_YELLOW : COL_CYAN,
+                                    items[i].label);
+        track(row);
+    }
+
+    lv_obj_t *hint = lv_label_create(s_screen);
+    lv_label_set_text(hint, "KEY1:sel  KEY2:back");
+    lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
+/* Main Menu */
+static const menu_item_t s_main_items[] = {
+    { "> WiFi",    UI_WIFI_MENU },
+    { "> Sub-GHz", UI_SUBGHZ_MENU },
+    { "> IR",      UI_IR_MENU },
+};
+#define MAIN_ITEM_COUNT 3
+
+static void build_main_menu(void)
+{
+    build_menu("DAVEY JONES", s_main_items, MAIN_ITEM_COUNT);
+
+    /* Show live stats at bottom. */
+    nesso_wardrive_status_t ws = {0};
+    nesso_eapol_status_t es = {0};
+    nesso_wardrive_status(&ws);
+    nesso_eapol_status(&es);
+    lv_obj_t *stats = make_label(s_screen, 28 + MAIN_ITEM_COUNT * 22 + 10, COL_CYAN, "");
+    lv_label_set_text_fmt(stats, "APs:%u PMK:%lu ch%u",
+                          (unsigned)ws.total_aps,
+                          (unsigned long)es.pmkids_captured,
+                          ws.current_channel);
+    track(stats);
+}
+
+/* WiFi Menu */
+static const menu_item_t s_wifi_items[] = {
+    { "> Scan",         UI_WIFI_SCANNING },
+    { "> AP List",      UI_WIFI_AP_LIST },
+    { "> Deauth",       UI_WIFI_DEAUTH_SELECT },
+    { "> Beacon Spam",  UI_WIFI_BEACON_SPAM },
+};
+#define WIFI_ITEM_COUNT 4
+
+/* WiFi AP List / Deauth Select (shared builder). */
+static void build_ap_list(const char *title, bool deauth_mode)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+
+    lv_obj_t *t = lv_label_create(s_screen);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 2);
+
+    s_dyn_count = 0;
+    s_cursor = 0;
+    refresh_ap_snapshot();
+
+    for (int i = 0; i < AP_VIEW_ROWS; ++i) {
+        lv_obj_t *row = make_label(s_screen, 20 + i * 22, COL_CYAN, "");
+        track(row);
+    }
+
+    /* Status / hint at bottom. */
+    lv_obj_t *status = make_label(s_screen, 20 + AP_VIEW_ROWS * 22 + 2, COL_WHITE,
+                                   deauth_mode ? "KEY1:sel KEY2:back 2xtap:go"
+                                               : "KEY1:scroll  KEY2:back");
+    track(status);  /* index = AP_VIEW_ROWS (last tracked) */
+
+    /* Touch double-tap for deauth mode. */
+    if (deauth_mode) {
+        lv_obj_add_flag(s_screen, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(s_screen, deauth_select_tapped, LV_EVENT_CLICKED, NULL);
+    }
+}
+
+static void refresh_ap_rows(bool deauth_mode)
+{
+    refresh_ap_snapshot();
+    size_t show = s_ap_snap_count < AP_VIEW_ROWS ? s_ap_snap_count : AP_VIEW_ROWS;
+
+    for (int i = 0; i < AP_VIEW_ROWS && i < s_dyn_count; ++i) {
+        if ((size_t)i < show) {
+            const nesso_wardrive_ap_t *ap = &s_ap_snap[i];
+            bool sel = (i == s_cursor);
+            bool target = s_deauth_active && memcmp(ap->bssid, s_deauth_bssid, 6) == 0;
+
+            char name[16];
+            if (ap->ssid[0])
+                snprintf(name, sizeof(name), "%.*s", sel ? 14 : 10, ap->ssid);
+            else
+                snprintf(name, sizeof(name), "%02X:%02X:%02X",
+                         ap->bssid[3], ap->bssid[4], ap->bssid[5]);
+
+            char row[36];
+            if (sel)
+                snprintf(row, sizeof(row), ">%-14s", name);
+            else
+                snprintf(row, sizeof(row), " %-4s %-9s %3d",
+                         ap->auth[0] ? ap->auth : "?", name, ap->rssi_peak);
+
+            lv_label_set_text(s_dyn_labels[i], row);
+            lv_obj_set_style_text_color(s_dyn_labels[i],
+                target ? COL_RED : sel ? COL_YELLOW : COL_CYAN, 0);
+        } else {
+            lv_label_set_text(s_dyn_labels[i], "");
+        }
+    }
+
+    /* Update status label (last tracked = index AP_VIEW_ROWS). */
+    if (s_dyn_count > AP_VIEW_ROWS) {
+        lv_obj_t *status = s_dyn_labels[AP_VIEW_ROWS];
+        if (s_cursor < (int)s_ap_snap_count) {
+            const nesso_wardrive_ap_t *sel = &s_ap_snap[s_cursor];
+            char info[36];
+            snprintf(info, sizeof(info), "%s ch%u %ddBm",
+                     sel->auth[0] ? sel->auth : "?",
+                     sel->primary_channel, sel->rssi_peak);
+            lv_label_set_text(status, info);
+            lv_obj_set_style_text_color(status, COL_YELLOW, 0);
+        }
+    }
+}
+
+/* Deauth Active screen. */
+static void build_deauth_active(void)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+
+    s_dyn_count = 0;
+    lv_obj_t *t = make_label(s_screen, 4, COL_RED, ">> DEAUTH <<");
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 4);
+    track(t);  /* 0: title */
+
+    int y = 30;
+    make_label(s_screen, y, COL_WHITE, "TARGET"); y += 18;
+    lv_obj_t *ssid  = make_label(s_screen, y, COL_YELLOW, s_deauth_ssid[0] ? s_deauth_ssid : "???"); y += 18;
+    track(ssid); /* 1 */
+
+    char mac[20];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             s_deauth_bssid[0], s_deauth_bssid[1], s_deauth_bssid[2],
+             s_deauth_bssid[3], s_deauth_bssid[4], s_deauth_bssid[5]);
+    make_label(s_screen, y, COL_CYAN, mac); y += 18;
+
+    char ch_info[20];
+    snprintf(ch_info, sizeof(ch_info), "ch%u", s_deauth_channel);
+    make_label(s_screen, y, COL_CYAN, ch_info); y += 24;
+
+    make_label(s_screen, y, COL_WHITE, "ATTACK"); y += 18;
+    lv_obj_t *frames = make_label(s_screen, y, COL_RED, "Frames: 0"); y += 18;
+    track(frames); /* 2 */
+    lv_obj_t *pmk = make_label(s_screen, y, COL_YELLOW, "PMKIDs: 0"); y += 18;
+    track(pmk); /* 3 */
+    lv_obj_t *tm = make_label(s_screen, y, COL_CYAN, "Time: 0:00"); y += 18;
+    track(tm); /* 4 */
+
+    lv_obj_t *hint = lv_label_create(s_screen);
+    lv_label_set_text(hint, "KEY1:stop  KEY2:back");
+    lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
+static void refresh_deauth_active(void)
+{
+    if (s_dyn_count < 5) return;
+
+    /* Blink title. */
+    static bool blink = false; blink = !blink;
+    lv_label_set_text(s_dyn_labels[0], blink ? ">> DEAUTH <<" : "   DEAUTH   ");
+    lv_obj_set_style_text_color(s_dyn_labels[0], blink ? COL_RED : COL_MAGENTA, 0);
+
+    lv_label_set_text_fmt(s_dyn_labels[2], "Frames: %lu", (unsigned long)s_deauth_sent);
+
+    nesso_eapol_status_t es = {0};
+    nesso_eapol_status(&es);
+    lv_label_set_text_fmt(s_dyn_labels[3], "PMKIDs: %lu", (unsigned long)es.pmkids_captured);
+
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    uint32_t elapsed = (now_ms - s_atk_start_ms) / 1000;
+    lv_label_set_text_fmt(s_dyn_labels[4], "Time: %lu:%02lu",
+                          (unsigned long)(elapsed / 60), (unsigned long)(elapsed % 60));
+
+    if (!s_deauth_active) {
+        lv_label_set_text(s_dyn_labels[0], "STOPPED");
+        lv_obj_set_style_text_color(s_dyn_labels[0], COL_WHITE, 0);
+    }
+}
+
+/* Beacon Spam screen. */
+static void build_beacon_spam(void)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+
+    s_dyn_count = 0;
+
+    lv_obj_t *t = make_label(s_screen, 4, COL_MAGENTA, "BEACON SPAM");
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 4);
+
+    lv_obj_t *status = make_label(s_screen, 30, COL_GREEN, "BROADCASTING...");
+    track(status); /* 0 */
+
+    int y = 55;
+    for (int i = 0; i < 6 && i < (int)SPAM_COUNT; ++i) {
+        make_label(s_screen, y, COL_CYAN, s_spam_list[i]);
+        y += 18;
+    }
+    make_label(s_screen, y, COL_CYAN, "...");
+
+    lv_obj_t *hint = lv_label_create(s_screen);
+    lv_label_set_text(hint, "KEY2:stop & back");
+    lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
+/* Placeholder screen. */
+static void build_placeholder(const char *title)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+
+    lv_obj_t *t = lv_label_create(s_screen);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 4);
+
+    lv_obj_t *msg = lv_label_create(s_screen);
+    lv_label_set_text(msg, "Coming soon");
+    lv_obj_set_style_text_color(msg, COL_CYAN, 0);
+    lv_obj_align(msg, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t *hint = lv_label_create(s_screen);
+    lv_label_set_text(hint, "KEY2:back");
+    lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
+/* WiFi Scanning screen. */
+static void build_scanning(void)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+
+    lv_obj_t *msg = lv_label_create(s_screen);
+    lv_label_set_text(msg, "Scanning...");
+    lv_obj_set_style_text_color(msg, COL_YELLOW, 0);
+    lv_obj_align(msg, LV_ALIGN_CENTER, 0, 0);
+}
+
+/* -------------------- navigation -------------------- */
+
+static void navigate(ui_state_t state)
+{
+    s_state = state;
+    s_dyn_count = 0;
+
+    switch (state) {
+    case UI_SPLASH:           build_splash(); break;
+    case UI_MAIN_MENU:        build_main_menu(); break;
+    case UI_WIFI_MENU:        build_menu("WiFi", s_wifi_items, WIFI_ITEM_COUNT); break;
+    case UI_WIFI_SCANNING:    build_scanning(); break;
+    case UI_WIFI_AP_LIST:     build_ap_list("AP LIST", false); break;
+    case UI_WIFI_DEAUTH_SELECT: build_ap_list("SELECT TARGET", true); break;
+    case UI_WIFI_DEAUTH_ACTIVE: build_deauth_active(); break;
+    case UI_WIFI_BEACON_SPAM:
+        nesso_wifi_beacon_spam_start(s_spam_list, SPAM_COUNT, 0);
+        build_beacon_spam();
+        break;
+    case UI_SUBGHZ_MENU:      build_placeholder("SUB-GHZ"); break;
+    case UI_IR_MENU:          build_placeholder("INFRARED"); break;
+    }
+
+    if (s_screen) lv_scr_load(s_screen);
+}
+
+/* -------------------- menu navigation logic -------------------- */
+
+/* Get the menu item array and count for the current state. */
+static const menu_item_t *current_menu_items(int *out_count)
+{
+    switch (s_state) {
+    case UI_MAIN_MENU: *out_count = MAIN_ITEM_COUNT; return s_main_items;
+    case UI_WIFI_MENU: *out_count = WIFI_ITEM_COUNT; return s_wifi_items;
+    default: *out_count = 0; return NULL;
+    }
+}
+
+/* Update cursor highlight in a menu. */
+static void update_menu_cursor(int item_count)
+{
+    for (int i = 0; i < item_count && i < s_dyn_count; ++i) {
+        lv_obj_set_style_text_color(s_dyn_labels[i],
+            i == s_cursor ? COL_YELLOW : COL_CYAN, 0);
+    }
+}
+
+/* -------------------- refresh timer -------------------- */
 
 static void refresh_cb(lv_timer_t *t)
 {
     (void)t;
 
-    /* Apply any deferred view switch from touch callbacks. */
-    if (s_pending_view < NESSO_UI_VIEW_COUNT) {
-        nesso_ui_view_t v = s_pending_view;
-        s_pending_view = NESSO_UI_VIEW_COUNT;
-        show_view_locked(v);
+    /* Apply deferred navigation from touch. */
+    if (s_has_pending) {
+        s_has_pending = false;
+        navigate(s_pending_nav);
+        return;
     }
 
-    if (s_view == NESSO_UI_VIEW_DASH) {
-        nesso_wardrive_status_t ws = {0};
-        nesso_eapol_status_t es = {0};
-        nesso_wardrive_status(&ws);
-        nesso_eapol_status(&es);
+    /* WiFi scanning auto-transition: run scan then show results. */
+    if (s_state == UI_WIFI_SCANNING) {
+        /* Scan is blocking — run it, then navigate to AP list. */
+        nesso_wifi_scan(NULL, 0, NULL);
+        navigate(UI_WIFI_AP_LIST);
+        return;
+    }
 
-        lv_label_set_text_fmt(s_chan_label,   "CH   %u",  ws.current_channel);
-        lv_label_set_text_fmt(s_aps_label,    "APs  %u",  (unsigned)ws.total_aps);
-        lv_label_set_text_fmt(s_beacon_label, "BCN  %lu", (unsigned long)ws.beacons_parsed);
-        lv_label_set_text_fmt(s_pmkid_label,  "PMK  %lu", (unsigned long)es.pmkids_captured);
-        lv_label_set_text_fmt(s_power_label,  "USB  %s",
-                              nesso_usb_connected() ? "Y" : "N");
-
-        /* Show deauth status prominently on dash when active. */
-        if (s_deauth_active) {
-            char atk[32];
-            snprintf(atk, sizeof(atk), "ATK %.8s x%lu",
-                     s_deauth_ssid[0] ? s_deauth_ssid : "???",
-                     (unsigned long)s_deauth_sent);
-            lv_label_set_text(s_dash_view_label, atk);
-            /* Alternate red/magenta for attention. */
-            static bool blink = false;
-            blink = !blink;
-            lv_obj_set_style_text_color(s_dash_view_label,
-                                        blink ? COL_RED : COL_MAGENTA, 0);
-        } else {
-            lv_label_set_text(s_dash_view_label, "[1/3] DASH");
-            lv_obj_set_style_text_color(s_dash_view_label, COL_WHITE, 0);
+    /* Per-state refresh. */
+    switch (s_state) {
+    case UI_WIFI_AP_LIST:
+    case UI_WIFI_DEAUTH_SELECT:
+        refresh_ap_rows(s_state == UI_WIFI_DEAUTH_SELECT);
+        break;
+    case UI_WIFI_DEAUTH_ACTIVE:
+        refresh_deauth_active();
+        break;
+    case UI_MAIN_MENU:
+        /* Refresh stats line. */
+        if (s_dyn_count > MAIN_ITEM_COUNT) {
+            nesso_wardrive_status_t ws = {0};
+            nesso_eapol_status_t es = {0};
+            nesso_wardrive_status(&ws);
+            nesso_eapol_status(&es);
+            lv_label_set_text_fmt(s_dyn_labels[MAIN_ITEM_COUNT],
+                "APs:%u PMK:%lu ch%u",
+                (unsigned)ws.total_aps,
+                (unsigned long)es.pmkids_captured,
+                ws.current_channel);
         }
-    }
-
-    if (s_view == NESSO_UI_VIEW_APS) {
-        refresh_aps_view();
-    }
-
-    if (s_view == NESSO_UI_VIEW_ATTACK) {
-        update_attack_screen();
+        break;
+    default:
+        break;
     }
 }
 
-/* -------------------- view switching -------------------- */
-
-static lv_obj_t *screen_for(nesso_ui_view_t v)
-{
-    switch (v) {
-    case NESSO_UI_VIEW_DASH:   return s_dash_scr;
-    case NESSO_UI_VIEW_APS:    return s_aps_scr;
-    case NESSO_UI_VIEW_ATTACK: return s_atk_scr;
-    case NESSO_UI_VIEW_LORA:   return s_lora_scr;
-    default: return s_dash_scr;
-    }
-}
-
-static void show_view_locked(nesso_ui_view_t v)
-{
-    if (v >= NESSO_UI_VIEW_COUNT) v = NESSO_UI_VIEW_DASH;
-    s_view = v;
-    lv_obj_t *scr = screen_for(v);
-    if (scr) lv_scr_load(scr);
-
-    /* Force an immediate refresh when entering a view. */
-    if (v == NESSO_UI_VIEW_APS) {
-        s_aps_cursor = 0;
-        refresh_aps_view();
-    }
-}
-
-esp_err_t nesso_ui_show(nesso_ui_view_t view)
-{
-    if (!s_up) return ESP_ERR_INVALID_STATE;
-    lvgl_port_lock(0);
-    show_view_locked(view);
-    lvgl_port_unlock();
-    return ESP_OK;
-}
-
-/* -------------------- button handler task -------------------- */
+/* -------------------- button handler -------------------- */
 
 static void button_task(void *arg)
 {
     (void)arg;
     QueueHandle_t q = nesso_buttons_event_queue();
-    if (!q) {
-        ESP_LOGW(TAG, "no button queue");
-        s_button_task = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
+    if (!q) { s_button_task = NULL; vTaskDelete(NULL); return; }
 
     nesso_btn_event_t evt;
     while (1) {
         if (xQueueReceive(q, &evt, portMAX_DELAY) != pdTRUE) continue;
 
-        /*
-         * Button map:
-         *   KEY1 short  = scroll down AP list (on APS) / cycle views (elsewhere)
-         *   KEY2 short  = cycle views
-         *   KEY1 long   = stop deauth + go to DASH
-         *   Double-tap on screen (touch) = start/stop deauth
-         */
-
-        /* Long-press KEY1 = emergency stop from any view. */
+        /* Long-press KEY1 from anywhere = emergency stop + main menu. */
         if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
             lvgl_port_lock(0);
             if (s_deauth_active) stop_deauth();
+            if (nesso_wifi_beacon_spam_is_active()) nesso_wifi_beacon_spam_stop();
+            navigate(UI_MAIN_MENU);
             lvgl_port_unlock();
-            nesso_ui_show(NESSO_UI_VIEW_DASH);
             continue;
         }
 
-        /* Long-press KEY2 on APS = start deauth + go to attack view. */
-        if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
-            if (s_view == NESSO_UI_VIEW_APS && s_ap_snap_count > 0) {
-                lvgl_port_lock(0);
-                if (!s_deauth_active) start_deauth(s_aps_cursor);
-                lvgl_port_unlock();
-                nesso_ui_show(NESSO_UI_VIEW_ATTACK);
+        if (evt.type != NESSO_BTN_EVT_PRESS && evt.type != NESSO_BTN_EVT_LONG_PRESS)
+            continue;
+
+        lvgl_port_lock(0);
+
+        switch (s_state) {
+
+        case UI_SPLASH:
+            /* Any key → main menu. */
+            navigate(UI_MAIN_MENU);
+            break;
+
+        case UI_MAIN_MENU:
+        case UI_WIFI_MENU:
+        {
+            int count = 0;
+            const menu_item_t *items = current_menu_items(&count);
+            if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_PRESS) {
+                /* Select item. */
+                if (items && s_cursor < count) {
+                    navigate(items[s_cursor].target);
+                }
+            } else if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_PRESS) {
+                if (s_state == UI_WIFI_MENU) {
+                    navigate(UI_MAIN_MENU);
+                }
+                /* Main menu: KEY2 does nothing (top level). */
+            } else if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
+                /* Already handled above. */
+            } else if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
+                /* Scroll down in menu. */
+                if (count > 0) {
+                    s_cursor = (s_cursor + 1) % count;
+                    update_menu_cursor(count);
+                }
             }
-            continue;
+            break;
         }
 
-        if (evt.type != NESSO_BTN_EVT_PRESS) continue;
-
-        if (s_view == NESSO_UI_VIEW_APS && evt.key == NESSO_KEY1) {
-            /* Main button on APS = scroll down. */
-            lvgl_port_lock(0);
-            s_aps_cursor = (s_aps_cursor + 1) %
-                (s_ap_snap_count > 0 ? (int)s_ap_snap_count : 1);
-            refresh_aps_view();
-            lvgl_port_unlock();
-        } else if (s_view == NESSO_UI_VIEW_ATTACK) {
-            /* Attack view: KEY1 = stop + back, KEY2 = back (keep running) */
+        case UI_WIFI_AP_LIST:
             if (evt.key == NESSO_KEY1) {
-                lvgl_port_lock(0);
-                if (s_deauth_active) stop_deauth();
-                lvgl_port_unlock();
-                nesso_ui_show(NESSO_UI_VIEW_APS);
+                s_cursor = (s_cursor + 1) % (s_ap_snap_count > 0 ? (int)s_ap_snap_count : 1);
+                refresh_ap_rows(false);
             } else if (evt.key == NESSO_KEY2) {
-                nesso_ui_show(NESSO_UI_VIEW_APS);
+                navigate(UI_WIFI_MENU);
             }
-        } else if (evt.key == NESSO_KEY2) {
-            /* KEY2 short = next view (skip attack view in normal cycling). */
-            nesso_ui_view_t next = (nesso_ui_view_t)((s_view + 1) % NESSO_UI_VIEW_COUNT);
-            if (next == NESSO_UI_VIEW_ATTACK) next = (nesso_ui_view_t)((next + 1) % NESSO_UI_VIEW_COUNT);
-            nesso_ui_show(next);
-        } else if (evt.key == NESSO_KEY1) {
-            /* KEY1 short on DASH/LORA = cycle views. */
-            nesso_ui_view_t next = (nesso_ui_view_t)((s_view + 1) % NESSO_UI_VIEW_COUNT);
-            if (next == NESSO_UI_VIEW_ATTACK) next = (nesso_ui_view_t)((next + 1) % NESSO_UI_VIEW_COUNT);
-            nesso_ui_show(next);
+            break;
+
+        case UI_WIFI_DEAUTH_SELECT:
+            if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_PRESS) {
+                /* Scroll. */
+                s_cursor = (s_cursor + 1) % (s_ap_snap_count > 0 ? (int)s_ap_snap_count : 1);
+                refresh_ap_rows(true);
+            } else if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
+                /* Long-press KEY2 = attack. */
+                if (s_ap_snap_count > 0 && !s_deauth_active) {
+                    start_deauth(s_cursor);
+                    navigate(UI_WIFI_DEAUTH_ACTIVE);
+                }
+            } else if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_PRESS) {
+                navigate(UI_WIFI_MENU);
+            }
+            break;
+
+        case UI_WIFI_DEAUTH_ACTIVE:
+            if (evt.key == NESSO_KEY1) {
+                stop_deauth();
+                navigate(UI_WIFI_DEAUTH_SELECT);
+            } else if (evt.key == NESSO_KEY2) {
+                navigate(UI_WIFI_DEAUTH_SELECT);
+            }
+            break;
+
+        case UI_WIFI_BEACON_SPAM:
+            if (evt.key == NESSO_KEY2 || evt.key == NESSO_KEY1) {
+                nesso_wifi_beacon_spam_stop();
+                navigate(UI_WIFI_MENU);
+            }
+            break;
+
+        case UI_SUBGHZ_MENU:
+        case UI_IR_MENU:
+            if (evt.key == NESSO_KEY2) navigate(UI_MAIN_MENU);
+            break;
+
+        default:
+            break;
         }
+
+        lvgl_port_unlock();
     }
 }
 
@@ -660,69 +758,38 @@ esp_err_t nesso_ui_init(void)
         .vres          = NESSO_LCD_HEIGHT,
         .monochrome    = false,
         .color_format  = LV_COLOR_FORMAT_RGB565,
-        .rotation      = {
-            .swap_xy  = false,
-            .mirror_x = false,
-            .mirror_y = false,
-        },
-        .flags = {
-            .buff_dma   = true,
-            .swap_bytes = true,
-        },
+        .rotation      = { .swap_xy = false, .mirror_x = false, .mirror_y = false },
+        .flags         = { .buff_dma = true, .swap_bytes = true },
     };
     s_disp = lvgl_port_add_disp(&disp_cfg);
-    if (!s_disp) {
-        ESP_LOGE(TAG, "lvgl_port_add_disp failed");
-        return ESP_FAIL;
-    }
+    if (!s_disp) return ESP_FAIL;
 
-    /* Touch input — FT6336 in POLLING mode (int_gpio=-1) to avoid the
-     * GPIO3 conflict with the BMI270 IMU interrupt line. */
+    /* Touch (polling — no GPIO3 interrupt). */
     {
-        esp_lcd_panel_io_i2c_config_t tp_io_cfg =
-            ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
+        esp_lcd_panel_io_i2c_config_t tp_io_cfg = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
         esp_lcd_panel_io_handle_t tp_io = NULL;
-        esp_err_t tp_err = esp_lcd_new_panel_io_i2c(
-            nesso_i2c_bus(), &tp_io_cfg, &tp_io);
-        if (tp_err == ESP_OK) {
+        if (esp_lcd_new_panel_io_i2c(nesso_i2c_bus(), &tp_io_cfg, &tp_io) == ESP_OK) {
             esp_lcd_touch_config_t tp_cfg = {
-                .x_max = NESSO_LCD_WIDTH,
-                .y_max = NESSO_LCD_HEIGHT,
-                .rst_gpio_num = -1,
-                .int_gpio_num = -1,   /* POLLING — no interrupt pin */
+                .x_max = NESSO_LCD_WIDTH, .y_max = NESSO_LCD_HEIGHT,
+                .rst_gpio_num = -1, .int_gpio_num = -1,
                 .flags = { .swap_xy = 0, .mirror_x = 0, .mirror_y = 0 },
             };
-            tp_err = esp_lcd_touch_new_i2c_ft5x06(tp_io, &tp_cfg, &s_touch);
-            if (tp_err == ESP_OK && s_touch) {
-                const lvgl_port_touch_cfg_t touch_cfg = {
-                    .disp = s_disp, .handle = s_touch,
-                };
+            if (esp_lcd_touch_new_i2c_ft5x06(tp_io, &tp_cfg, &s_touch) == ESP_OK && s_touch) {
+                lvgl_port_touch_cfg_t touch_cfg = { .disp = s_disp, .handle = s_touch };
                 s_touch_indev = lvgl_port_add_touch(&touch_cfg);
-                ESP_LOGI(TAG, "touch (polling mode) registered");
-            } else {
-                ESP_LOGW(TAG, "touch init: %s (non-fatal)", esp_err_to_name(tp_err));
             }
-        } else {
-            ESP_LOGW(TAG, "touch IO: %s (non-fatal)", esp_err_to_name(tp_err));
         }
     }
 
     lvgl_port_lock(0);
-    build_dash_screen();
-    build_aps_screen();
-    build_attack_screen();
-    build_lora_screen();
-    show_view_locked(NESSO_UI_VIEW_DASH);
+    navigate(UI_SPLASH);
     s_refresh_timer = lv_timer_create(refresh_cb, 250, NULL);
     lvgl_port_unlock();
 
-    BaseType_t ok = xTaskCreate(button_task, "nesso_ui_btn", 6144, NULL, 4, &s_button_task);
-    if (ok != pdPASS) {
-        ESP_LOGW(TAG, "ui button task failed to start (non-fatal)");
-    }
+    xTaskCreate(button_task, "nesso_ui_btn", 6144, NULL, 4, &s_button_task);
 
     s_up = true;
-    ESP_LOGI(TAG, "UI up (dashboard)");
+    ESP_LOGI(TAG, "UI up (splash)");
     return ESP_OK;
 }
 
@@ -739,4 +806,5 @@ esp_err_t nesso_ui_deinit(void)
     return ESP_OK;
 }
 
+esp_err_t nesso_ui_show(nesso_ui_view_t view) { (void)view; return ESP_OK; }
 bool nesso_ui_is_up(void) { return s_up; }

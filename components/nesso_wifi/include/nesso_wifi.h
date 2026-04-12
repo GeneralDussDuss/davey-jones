@@ -171,6 +171,27 @@ esp_err_t nesso_wifi_send_deauth(const uint8_t ap_bssid[6],
                                   uint16_t reason,
                                   uint16_t count);
 
+/* -------------------- beacon spam -------------------- */
+
+/**
+ * Start broadcasting fake beacon frames with the given SSIDs.
+ * Spawns a task that cycles through the SSID list, sending one beacon
+ * per SSID per cycle at ~10ms intervals. Call nesso_wifi_beacon_spam_stop()
+ * to stop.
+ *
+ * @param ssids      Array of SSID strings.
+ * @param count      Number of SSIDs.
+ * @param channel    Channel to broadcast on (0 = current).
+ */
+esp_err_t nesso_wifi_beacon_spam_start(const char **ssids, size_t count,
+                                        uint8_t channel);
+
+/** Stop beacon spam. */
+esp_err_t nesso_wifi_beacon_spam_stop(void);
+
+/** True if beacon spam is currently active. */
+bool nesso_wifi_beacon_spam_is_active(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -503,3 +503,119 @@ esp_err_t nesso_wifi_send_deauth(const uint8_t ap_bssid[6],
     }
     return ESP_OK;
 }
+
+/* -------------------- beacon spam -------------------- */
+
+static TaskHandle_t s_spam_task = NULL;
+static const char **s_spam_ssids = NULL;
+static size_t       s_spam_count = 0;
+static bool         s_spam_running = false;
+
+/*
+ * Craft a minimal beacon frame for a given SSID.
+ * Returns frame length. Buffer must be >= 128 bytes.
+ */
+static int craft_beacon(uint8_t *frame, const char *ssid, uint8_t channel)
+{
+    memset(frame, 0, 128);
+    size_t ssid_len = strlen(ssid);
+    if (ssid_len > 32) ssid_len = 32;
+
+    /* Frame control: beacon (0x80 0x00). */
+    frame[0] = 0x80; frame[1] = 0x00;
+    /* Duration. */
+    frame[2] = 0x00; frame[3] = 0x00;
+    /* Addr1: broadcast. */
+    memset(frame + 4, 0xFF, 6);
+    /* Addr2: random-ish source MAC. */
+    frame[10] = 0xDE; frame[11] = 0xAD;
+    frame[12] = 0xBE; frame[13] = 0xEF;
+    frame[14] = (uint8_t)(ssid_len ^ 0x42);
+    frame[15] = (uint8_t)(channel ^ 0x13);
+    /* Addr3: same as addr2 (BSSID). */
+    memcpy(frame + 16, frame + 10, 6);
+    /* Seq ctrl. */
+    frame[22] = 0x00; frame[23] = 0x00;
+
+    /* Fixed body: timestamp(8) + beacon_interval(2) + capability(2). */
+    int p = 24;
+    memset(frame + p, 0, 8); p += 8;  /* timestamp */
+    frame[p] = 0x64; frame[p+1] = 0x00; p += 2;  /* 100 TU interval */
+    frame[p] = 0x31; frame[p+1] = 0x04; p += 2;  /* capability: ESS + privacy */
+
+    /* Tag 0: SSID. */
+    frame[p++] = 0x00;
+    frame[p++] = (uint8_t)ssid_len;
+    memcpy(frame + p, ssid, ssid_len);
+    p += ssid_len;
+
+    /* Tag 1: Supported rates (mandatory). */
+    frame[p++] = 0x01;
+    frame[p++] = 0x04;
+    frame[p++] = 0x82; frame[p++] = 0x84;
+    frame[p++] = 0x8b; frame[p++] = 0x96;
+
+    /* Tag 3: DS parameter set — channel. */
+    frame[p++] = 0x03;
+    frame[p++] = 0x01;
+    frame[p++] = channel;
+
+    return p;
+}
+
+static void spam_task(void *arg)
+{
+    (void)arg;
+    uint8_t frame[128];
+    uint8_t ch = 0;
+    nesso_wifi_get_channel(&ch);
+    if (ch == 0) ch = 1;
+
+    while (s_spam_running) {
+        for (size_t i = 0; i < s_spam_count && s_spam_running; ++i) {
+            int len = craft_beacon(frame, s_spam_ssids[i], ch);
+            /* Vary the source MAC per SSID so each appears as a different AP. */
+            frame[14] = (uint8_t)(i & 0xFF);
+            frame[15] = (uint8_t)((i >> 8) & 0xFF);
+            memcpy(frame + 16, frame + 10, 6);  /* sync addr3 = addr2 */
+            esp_wifi_80211_tx(WIFI_IF_STA, frame, len, true);
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    s_spam_task = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t nesso_wifi_beacon_spam_start(const char **ssids, size_t count,
+                                        uint8_t channel)
+{
+    if (!s_initted) return ESP_ERR_INVALID_STATE;
+    if (s_spam_running) return ESP_OK;
+    if (!ssids || count == 0) return ESP_ERR_INVALID_ARG;
+
+    if (channel > 0) nesso_wifi_set_channel(channel);
+
+    s_spam_ssids   = ssids;
+    s_spam_count   = count;
+    s_spam_running = true;
+
+    BaseType_t ok = xTaskCreate(spam_task, "bcn_spam", 4096, NULL, 5, &s_spam_task);
+    if (ok != pdPASS) {
+        s_spam_running = false;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "beacon spam started: %zu SSIDs", count);
+    return ESP_OK;
+}
+
+esp_err_t nesso_wifi_beacon_spam_stop(void)
+{
+    if (!s_spam_running) return ESP_OK;
+    s_spam_running = false;
+    for (int i = 0; i < 20 && s_spam_task; ++i) vTaskDelay(pdMS_TO_TICKS(50));
+    ESP_LOGI(TAG, "beacon spam stopped");
+    return ESP_OK;
+}
+
+bool nesso_wifi_beacon_spam_is_active(void) { return s_spam_running; }
