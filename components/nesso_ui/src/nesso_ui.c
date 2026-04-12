@@ -957,18 +957,25 @@ static void refresh_cb(lv_timer_t *t)
         break;
     case UI_IR_TVBGONE:
     {
-        /* Run TV-B-Gone in the refresh tick. Non-ideal (blocks LVGL)
-         * but simple. The whole thing takes ~3 seconds. */
+        /* Fire continuously — one full cycle per refresh tick. */
+        static uint32_t s_tvbg_rounds = 0;
         if (!s_tvbg_done) {
-            s_tvbg_done = true;
+            s_tvbg_done = true;  /* init flag — means "started" not "finished" */
+            s_tvbg_rounds = 0;
             if (!nesso_ir_is_ready()) nesso_ir_init();
-            int sent = nesso_ir_tvbgone();
-            if (s_dyn_count >= 2) {
-                lv_label_set_text(s_dyn_labels[0], "Done!");
-                lv_label_set_text_fmt(s_dyn_labels[1], "%d codes sent", sent);
-                lv_obj_set_style_text_color(s_dyn_labels[0], COL_GREEN, 0);
-            }
         }
+        nesso_ir_tvbgone();
+        s_tvbg_rounds++;
+        if (s_dyn_count >= 2) {
+            lv_label_set_text_fmt(s_dyn_labels[0], "Round %lu firing...",
+                                  (unsigned long)s_tvbg_rounds);
+            lv_label_set_text_fmt(s_dyn_labels[1], "%lu codes sent",
+                                  (unsigned long)(s_tvbg_rounds * 20));
+            static bool blink = false; blink = !blink;
+            lv_obj_set_style_text_color(s_dyn_labels[0],
+                                        blink ? COL_RED : COL_YELLOW, 0);
+        }
+        nesso_led(s_tvbg_rounds % 2 == 0);
         break;
     }
     case UI_MAIN_MENU:
