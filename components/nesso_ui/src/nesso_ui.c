@@ -324,9 +324,12 @@ static void build_menu(const char *title, const menu_item_t *items, int count)
     s_cursor = 0;
     s_dyn_count = 0;
     for (int i = 0; i < count && i < 10; ++i) {
-        /* Each menu item is a container with padding for the highlight bg. */
+        /* Each menu item is a container with padding for the highlight bg.
+         * Must NOT be clickable — otherwise it intercepts touches meant
+         * for the screen's double-tap handler. */
         lv_obj_t *row = lv_obj_create(s_screen);
         lv_obj_remove_style_all(row);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_size(row, 125, 24);
         lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 28 + i * 26);
 
