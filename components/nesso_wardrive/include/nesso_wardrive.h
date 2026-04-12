@@ -87,6 +87,7 @@ esp_err_t nesso_wardrive_stop(void);
 typedef struct {
     uint8_t  bssid[6];
     char     ssid[33];
+    char     auth[5];       /* "OPN", "WEP", "WPA", "WPA2" */
     uint8_t  primary_channel;
     int8_t   rssi_peak;
     int8_t   rssi_last;

@@ -18,6 +18,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -134,17 +135,25 @@ static void stop_deauth(void);
 
 /* -------------------- APS view (target selection + deauth) -------------------- */
 
-/* Touch callback for tapping an AP row. User data = row index. */
-static void ap_row_clicked(lv_event_t *e)
-{
-    int row = (int)(intptr_t)lv_event_get_user_data(e);
-    if ((size_t)row >= s_ap_snap_count) return;
+/* Double-tap detection for touch deauth. */
+static uint32_t s_last_tap_ms = 0;
+#define DOUBLE_TAP_MS 500
 
-    s_aps_cursor = row;
-    if (s_deauth_active) {
-        stop_deauth();
+static void aps_screen_tapped(lv_event_t *e)
+{
+    (void)e;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if (s_last_tap_ms && (now - s_last_tap_ms) < DOUBLE_TAP_MS) {
+        /* Double tap — toggle deauth on highlighted AP. */
+        if (s_deauth_active) {
+            stop_deauth();
+        } else if (s_ap_snap_count > 0) {
+            start_deauth(s_aps_cursor);
+        }
+        s_last_tap_ms = 0;  /* reset so triple-tap doesn't re-trigger */
+    } else {
+        s_last_tap_ms = now;
     }
-    start_deauth(row);
 }
 
 static void build_aps_screen(void)
@@ -152,24 +161,21 @@ static void build_aps_screen(void)
     s_aps_scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(s_aps_scr, COL_BLACK, 0);
     lv_obj_set_style_bg_opa  (s_aps_scr, LV_OPA_COVER, 0);
+    /* Full-screen touch target for double-tap deauth. */
+    lv_obj_add_flag(s_aps_scr, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_aps_scr, aps_screen_tapped, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *title = lv_label_create(s_aps_scr);
     lv_label_set_text(title, "SELECT TARGET");
     lv_obj_set_style_text_color(title, COL_MAGENTA, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
 
-    /* 8 rows for AP entries — made clickable for touch. */
+    /* 8 rows for AP entries. */
     for (int i = 0; i < APS_VIEW_ROWS; ++i) {
         s_ap_rows[i] = lv_label_create(s_aps_scr);
         lv_label_set_text(s_ap_rows[i], "");
         lv_obj_set_style_text_color(s_ap_rows[i], COL_CYAN, 0);
         lv_obj_align(s_ap_rows[i], LV_ALIGN_TOP_LEFT, 4, 20 + i * 22);
-
-        /* Make the label tappable. Widen the hit area to full screen width. */
-        lv_obj_add_flag(s_ap_rows[i], LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_width(s_ap_rows[i], NESSO_LCD_WIDTH - 8);
-        lv_obj_add_event_cb(s_ap_rows[i], ap_row_clicked, LV_EVENT_CLICKED,
-                            (void *)(intptr_t)i);
     }
 
     /* Status bar at bottom */
@@ -215,50 +221,60 @@ static void refresh_aps_view(void)
     for (int i = 0; i < APS_VIEW_ROWS; ++i) {
         if ((size_t)i < s_ap_snap_count) {
             const nesso_wardrive_ap_t *ap = &s_ap_snap[i];
+            bool is_cursor = (i == s_aps_cursor);
+            bool is_target = s_deauth_active &&
+                memcmp(ap->bssid, s_deauth_bssid, 6) == 0;
 
-            /* Build display name: SSID if known, otherwise MAC suffix. */
-            char name[16];
+            /* Build display name. */
+            char name[20];
             if (ap->ssid[0]) {
-                snprintf(name, sizeof(name), "%.10s", ap->ssid);
+                /* Highlighted row shows full name, others truncated. */
+                int max_chars = is_cursor ? 18 : 10;
+                snprintf(name, sizeof(name), "%.*s", max_chars, ap->ssid);
             } else {
                 snprintf(name, sizeof(name), "%02X:%02X:%02X",
                          ap->bssid[3], ap->bssid[4], ap->bssid[5]);
             }
 
-            char row[32];
-            snprintf(row, sizeof(row), "%-10s %2u %3d",
-                     name, ap->primary_channel, ap->rssi_peak);
+            char row[40];
+            if (is_cursor) {
+                /* Highlighted: show full info with auth type. */
+                snprintf(row, sizeof(row), ">%.18s", name);
+            } else {
+                /* Normal: compact. Auth prefix + name + rssi. */
+                const char *auth = ap->auth[0] ? ap->auth : "?";
+                snprintf(row, sizeof(row), "%-4s %-10s %3d",
+                         auth, name, ap->rssi_peak);
+            }
             lv_label_set_text(s_ap_rows[i], row);
 
-            /* Color coding:
-             *   Selected + attacking = RED (blinking handled by timer)
-             *   Selected = YELLOW
-             *   Normal = CYAN */
             lv_color_t color;
-            bool is_target = s_deauth_active &&
-                memcmp(ap->bssid, s_deauth_bssid, 6) == 0;
-            if (is_target) {
-                color = COL_RED;
-            } else if (i == s_aps_cursor) {
-                color = COL_YELLOW;
-            } else {
-                color = COL_CYAN;
-            }
+            if (is_target) color = COL_RED;
+            else if (is_cursor) color = COL_YELLOW;
+            else color = COL_CYAN;
             lv_obj_set_style_text_color(s_ap_rows[i], color, 0);
         } else {
             lv_label_set_text(s_ap_rows[i], "");
         }
     }
 
-    /* Status bar */
+    /* Status bar — shows attack status or highlighted AP details. */
     if (s_deauth_active) {
         char status[64];
-        snprintf(status, sizeof(status), ">> DEAUTH x%lu ch%u",
+        snprintf(status, sizeof(status), "DEAUTH x%lu ch%u",
                  (unsigned long)s_deauth_sent, s_deauth_channel);
         lv_label_set_text(s_aps_status_label, status);
         lv_obj_set_style_text_color(s_aps_status_label, COL_RED, 0);
+    } else if (s_ap_snap_count > 0 && s_aps_cursor < (int)s_ap_snap_count) {
+        const nesso_wardrive_ap_t *sel = &s_ap_snap[s_aps_cursor];
+        char info[40];
+        snprintf(info, sizeof(info), "%s ch%u %ddBm",
+                 sel->auth[0] ? sel->auth : "?",
+                 sel->primary_channel, sel->rssi_peak);
+        lv_label_set_text(s_aps_status_label, info);
+        lv_obj_set_style_text_color(s_aps_status_label, COL_YELLOW, 0);
     } else {
-        lv_label_set_text(s_aps_status_label, "v:scroll  hold:attack");
+        lv_label_set_text(s_aps_status_label, "btn:scroll 2xtap:atk");
         lv_obj_set_style_text_color(s_aps_status_label, COL_WHITE, 0);
     }
 }
@@ -445,13 +461,13 @@ static void button_task(void *arg)
 
         /*
          * Button map:
-         *   KEY1 short  = scroll down AP list (APS view) / jump to APS (other views)
-         *   KEY2 short  = cycle views (DASH -> APS -> LORA -> DASH)
-         *   KEY2 long   = on APS: start/stop deauth on highlighted AP
-         *   KEY1 long   = stop deauth + go to DASH (emergency stop)
+         *   KEY1 short  = scroll down AP list (on APS) / cycle views (elsewhere)
+         *   KEY2 short  = cycle views
+         *   KEY1 long   = stop deauth + go to DASH
+         *   Double-tap on screen (touch) = start/stop deauth
          */
 
-        /* Emergency stop: KEY1 long-press from any view. */
+        /* Long-press KEY1 = emergency stop from any view. */
         if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
             lvgl_port_lock(0);
             if (s_deauth_active) stop_deauth();
@@ -460,15 +476,12 @@ static void button_task(void *arg)
             continue;
         }
 
-        /* KEY2 long-press on APS = attack / stop. */
+        /* Long-press KEY2 on APS = start/stop deauth. */
         if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
-            if (s_view == NESSO_UI_VIEW_APS) {
+            if (s_view == NESSO_UI_VIEW_APS && s_ap_snap_count > 0) {
                 lvgl_port_lock(0);
-                if (s_deauth_active) {
-                    stop_deauth();
-                } else {
-                    start_deauth(s_aps_cursor);
-                }
+                if (s_deauth_active) stop_deauth();
+                else start_deauth(s_aps_cursor);
                 lvgl_port_unlock();
             }
             continue;
@@ -476,22 +489,21 @@ static void button_task(void *arg)
 
         if (evt.type != NESSO_BTN_EVT_PRESS) continue;
 
-        if (evt.key == NESSO_KEY2) {
-            /* KEY2 short = next view. */
+        if (s_view == NESSO_UI_VIEW_APS && evt.key == NESSO_KEY1) {
+            /* Main button on APS = scroll down. */
+            lvgl_port_lock(0);
+            s_aps_cursor = (s_aps_cursor + 1) %
+                (s_ap_snap_count > 0 ? (int)s_ap_snap_count : 1);
+            refresh_aps_view();
+            lvgl_port_unlock();
+        } else if (evt.key == NESSO_KEY2) {
+            /* KEY2 short = next view from any screen. */
             nesso_ui_view_t next = (nesso_ui_view_t)((s_view + 1) % NESSO_UI_VIEW_COUNT);
             nesso_ui_show(next);
         } else if (evt.key == NESSO_KEY1) {
-            if (s_view == NESSO_UI_VIEW_APS) {
-                /* KEY1 short on APS = scroll cursor down. */
-                lvgl_port_lock(0);
-                s_aps_cursor = (s_aps_cursor + 1) %
-                    (s_ap_snap_count > 0 ? (int)s_ap_snap_count : 1);
-                refresh_aps_view();
-                lvgl_port_unlock();
-            } else {
-                /* KEY1 short on DASH/LORA = jump to APS. */
-                nesso_ui_show(NESSO_UI_VIEW_APS);
-            }
+            /* KEY1 short on DASH/LORA = cycle views too. */
+            nesso_ui_view_t next = (nesso_ui_view_t)((s_view + 1) % NESSO_UI_VIEW_COUNT);
+            nesso_ui_show(next);
         }
     }
 }
@@ -530,35 +542,36 @@ esp_err_t nesso_ui_init(void)
         return ESP_FAIL;
     }
 
-    /* 2a. Touch input — DISABLED for now. The FT6336 + shared GPIO3 INT
-     * line causes spurious events. TODO: investigate INT pin conflict
-     * with BMI270 IMU (both share GPIO3) or add debounce/validation.
-     * Buttons work fine for all navigation + deauth. */
-#if 0  /* Touch — re-enable after debugging GPIO3 conflict */
-    esp_lcd_panel_io_i2c_config_t tp_io_cfg =
-        ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
-    esp_lcd_panel_io_handle_t tp_io = NULL;
-    esp_err_t tp_err = esp_lcd_new_panel_io_i2c(
-        nesso_i2c_bus(), &tp_io_cfg, &tp_io);
-    if (tp_err == ESP_OK) {
-        esp_lcd_touch_config_t tp_cfg = {
-            .x_max = NESSO_LCD_WIDTH,
-            .y_max = NESSO_LCD_HEIGHT,
-            .rst_gpio_num = -1,
-            .int_gpio_num = NESSO_GPIO_TOUCH_IMU_INT,
-            .levels = { .reset = 0, .interrupt = 0 },
-            .flags  = { .swap_xy = 0, .mirror_x = 0, .mirror_y = 0 },
-        };
-        tp_err = esp_lcd_touch_new_i2c_ft5x06(tp_io, &tp_cfg, &s_touch);
-        if (tp_err == ESP_OK && s_touch) {
-            const lvgl_port_touch_cfg_t touch_cfg = {
-                .disp = s_disp, .handle = s_touch,
+    /* Touch input — FT6336 in POLLING mode (int_gpio=-1) to avoid the
+     * GPIO3 conflict with the BMI270 IMU interrupt line. */
+    {
+        esp_lcd_panel_io_i2c_config_t tp_io_cfg =
+            ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
+        esp_lcd_panel_io_handle_t tp_io = NULL;
+        esp_err_t tp_err = esp_lcd_new_panel_io_i2c(
+            nesso_i2c_bus(), &tp_io_cfg, &tp_io);
+        if (tp_err == ESP_OK) {
+            esp_lcd_touch_config_t tp_cfg = {
+                .x_max = NESSO_LCD_WIDTH,
+                .y_max = NESSO_LCD_HEIGHT,
+                .rst_gpio_num = -1,
+                .int_gpio_num = -1,   /* POLLING — no interrupt pin */
+                .flags = { .swap_xy = 0, .mirror_x = 0, .mirror_y = 0 },
             };
-            s_touch_indev = lvgl_port_add_touch(&touch_cfg);
-            ESP_LOGI(TAG, "touch input registered");
+            tp_err = esp_lcd_touch_new_i2c_ft5x06(tp_io, &tp_cfg, &s_touch);
+            if (tp_err == ESP_OK && s_touch) {
+                const lvgl_port_touch_cfg_t touch_cfg = {
+                    .disp = s_disp, .handle = s_touch,
+                };
+                s_touch_indev = lvgl_port_add_touch(&touch_cfg);
+                ESP_LOGI(TAG, "touch (polling mode) registered");
+            } else {
+                ESP_LOGW(TAG, "touch init: %s (non-fatal)", esp_err_to_name(tp_err));
+            }
+        } else {
+            ESP_LOGW(TAG, "touch IO: %s (non-fatal)", esp_err_to_name(tp_err));
         }
     }
-#endif
 
     lvgl_port_lock(0);
     build_dash_screen();

@@ -53,9 +53,6 @@ static uint8_t                 s_current_channel  = 1;
 
 static inline uint32_t now_seconds(void)
 {
-    /* If the RTC has been set (SNTP / user), use wall time; otherwise
-     * fall back to seconds since boot. Wigle accepts either; consumers
-     * downstream can distinguish via the CSV header timestamp. */
     time_t t = time(NULL);
     if (t > 1600000000) return (uint32_t)t;
     return (uint32_t)(esp_timer_get_time() / 1000000ULL);
@@ -65,9 +62,6 @@ static void format_timestamp(uint32_t ts, char *out, size_t n)
 {
     time_t t = (time_t)ts;
     struct tm tmv;
-    /* gmtime_r is usually safe on ESP-IDF. If ts is actually "seconds since
-     * boot" because RTC wasn't set, the output will be garbage but still
-     * non-empty — better than crashing. */
     if (t > 1600000000) {
         gmtime_r(&t, &tmv);
         strftime(out, n, "%Y-%m-%d %H:%M:%S", &tmv);
@@ -89,17 +83,11 @@ static int find_ap(const uint8_t bssid[6])
 static bool parse_beacon(const uint8_t *buf, uint16_t len,
                          nesso_wardrive_ap_t *out)
 {
-    /* Minimum beacon: 24 header + 12 fixed body + 2 tag header + 0 SSID. */
     if (len < 24 + 12 + 2) return false;
-
-    /* Frame control type/subtype: mgmt=0, beacon=8 → first byte 0x80. */
     if (buf[0] != 0x80) return false;
 
-    /* BSSID is addr3 at offset 16. */
     memcpy(out->bssid, buf + 16, 6);
 
-    /* Capability info at offset 24+10 = 34, little-endian 16-bit.
-     * Privacy bit is bit 4. */
     uint16_t cap = (uint16_t)buf[34] | ((uint16_t)buf[35] << 8);
     out->privacy = (cap & 0x0010) != 0;
 
@@ -107,6 +95,9 @@ static bool parse_beacon(const uint8_t *buf, uint16_t len,
     size_t p = 36;
     out->ssid[0]         = '\0';
     out->primary_channel = 0;
+    bool ssid_found      = false;
+    bool has_rsn         = false;
+    bool has_wpa         = false;
 
     while (p + 2 <= len) {
         uint8_t tag = buf[p];
@@ -114,35 +105,52 @@ static bool parse_beacon(const uint8_t *buf, uint16_t len,
         if (p + 2 + tlen > len) break;
 
         switch (tag) {
-        case 0: /* SSID */
-            if (tlen <= 32) {
+        case 0: /* SSID — only take the first non-empty occurrence. */
+            if (!ssid_found && tlen > 0 && tlen <= 32) {
                 memcpy(out->ssid, buf + p + 2, tlen);
                 out->ssid[tlen] = '\0';
+                ssid_found = true;
             }
             break;
-        case 3: /* DS parameter set — current operating channel */
+        case 3: /* DS parameter set — operating channel. */
             if (tlen == 1) {
                 out->primary_channel = buf[p + 2];
             }
             break;
-        default:
+        case 48: /* RSN IE — indicates WPA2/WPA3. */
+            has_rsn = true;
+            break;
+        case 221: /* Vendor IE — check for Microsoft WPA OUI. */
+            if (tlen >= 4 &&
+                buf[p+2] == 0x00 && buf[p+3] == 0x50 &&
+                buf[p+4] == 0xF2 && buf[p+5] == 0x01) {
+                has_wpa = true;
+            }
             break;
         }
         p += 2 + tlen;
     }
 
+    /* Derive auth hint from what we found. */
+    if (!out->privacy) {
+        memcpy(out->auth, "OPN", 4);
+    } else if (has_rsn) {
+        memcpy(out->auth, "WPA2", 5);
+    } else if (has_wpa) {
+        memcpy(out->auth, "WPA", 4);
+    } else {
+        memcpy(out->auth, "WEP", 4);
+    }
+
     return true;
 }
 
-/* Derive an auth-mode hint string from privacy bit alone. Full RSN IE
- * parsing lives as a TODO — it's needed for distinguishing WPA2/WPA3/OWE,
- * but for wardriving capture it's not load-bearing. */
-static const char *auth_hint(bool privacy)
+static const char *auth_str(const nesso_wardrive_ap_t *ap)
 {
-    return privacy ? "[PRIVACY]" : "[OPEN]";
+    return ap->auth[0] ? ap->auth : "???";
 }
 
-/* Emit one CSV line. Called only from the logger task (not the WiFi cb). */
+/* Emit one CSV line. Called only from the logger task. */
 static void write_csv_line(FILE *f, const nesso_wardrive_ap_t *ap)
 {
     char ts[32];
@@ -154,11 +162,10 @@ static void write_csv_line(FILE *f, const nesso_wardrive_ap_t *ap)
         if (fix.has_fix) s_gps_fixes_used++;
     }
 
-    /* Wigle-ish: MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,Lat,Lon,Alt,Acc,Type */
     fprintf(f,
             "%02X:%02X:%02X:%02X:%02X:%02X,"
             "\"%s\","
-            "%s,"
+            "[%s],"
             "%s,"
             "%u,"
             "%d,"
@@ -170,7 +177,7 @@ static void write_csv_line(FILE *f, const nesso_wardrive_ap_t *ap)
             ap->bssid[0], ap->bssid[1], ap->bssid[2],
             ap->bssid[3], ap->bssid[4], ap->bssid[5],
             ap->ssid,
-            auth_hint(ap->privacy),
+            auth_str(ap),
             ts,
             (unsigned)ap->primary_channel,
             (int)ap->rssi_peak,
@@ -194,39 +201,38 @@ static void IRAM_ATTR wdr_rx_cb(const uint8_t *buf, uint16_t len,
     s_beacons_parsed++;
 
     if (parsed.primary_channel == 0) parsed.primary_channel = channel;
+    if (parsed.primary_channel == 0) parsed.primary_channel = s_current_channel;
     parsed.rssi_last = rssi;
 
     if (xSemaphoreTake(s_lock, 0) != pdTRUE) {
-        /* Logger task is busy; drop this beacon. Beacons repeat every
-         * 100 ms so a loss is fine. */
         return;
     }
 
     int idx = find_ap(parsed.bssid);
     if (idx >= 0) {
-        /* Known AP: update liveness + peak RSSI. */
         nesso_wardrive_ap_t *e = &s_aps[idx];
         e->last_seen_s = now_seconds();
         e->rssi_last   = rssi;
         if (rssi > e->rssi_peak) e->rssi_peak = rssi;
-        /* SSID may appear on a later beacon if the first one had a hidden
-         * tag — fill in opportunistically. */
         if (e->ssid[0] == '\0' && parsed.ssid[0] != '\0') {
             memcpy(e->ssid, parsed.ssid, sizeof(e->ssid));
         }
         if (e->primary_channel == 0) e->primary_channel = parsed.primary_channel;
+        if (e->auth[0] == '\0' || (e->auth[0] == '?' && parsed.auth[0] != '?')) {
+            memcpy(e->auth, parsed.auth, sizeof(e->auth));
+        }
         xSemaphoreGive(s_lock);
         return;
     }
 
-    /* New AP. Append, then push to logger queue. */
     if (s_ap_count >= s_ap_capacity) {
         xSemaphoreGive(s_lock);
-        return;  /* table full — silently drop */
+        return;
     }
     nesso_wardrive_ap_t *e = &s_aps[s_ap_count++];
     memcpy(e->bssid, parsed.bssid, 6);
     memcpy(e->ssid,  parsed.ssid,  sizeof(e->ssid));
+    memcpy(e->auth,  parsed.auth,  sizeof(e->auth));
     e->primary_channel = parsed.primary_channel;
     e->rssi_last       = rssi;
     e->rssi_peak       = rssi;
@@ -234,8 +240,6 @@ static void IRAM_ATTR wdr_rx_cb(const uint8_t *buf, uint16_t len,
     e->first_seen_s    = now_seconds();
     e->last_seen_s     = e->first_seen_s;
 
-    /* Snapshot for the logger task — copy now so the table is safe to
-     * mutate concurrently. */
     nesso_wardrive_ap_t snap = *e;
     xSemaphoreGive(s_lock);
 
@@ -252,9 +256,6 @@ void nesso_wardrive_lock_channel(uint8_t ch)
     if (ch != 0) {
         nesso_wifi_set_channel(ch);
         s_current_channel = ch;
-        ESP_LOGI(TAG, "channel locked to %u", ch);
-    } else {
-        ESP_LOGI(TAG, "channel lock released");
     }
 }
 
@@ -266,7 +267,6 @@ static void hop_task(void *arg)
     uint8_t ch = 1;
     const TickType_t period = pdMS_TO_TICKS(s_cfg.dwell_ms);
     while (s_running) {
-        /* If channel is locked (deauth mode), stay put. */
         if (s_locked_channel) {
             vTaskDelay(period);
             continue;
@@ -285,11 +285,6 @@ static void hop_task(void *arg)
 
 static void log_task(void *arg)
 {
-    /*
-     * Ownership note: `arg` is the strdup'd path that nesso_wardrive_start
-     * allocated. The logger task owns this memory and MUST free it on
-     * every exit path or it leaks.
-     */
     char *path = (char *)arg;
     FILE *f = fopen(path, "a");
     if (!f) {
@@ -300,7 +295,6 @@ static void log_task(void *arg)
         return;
     }
 
-    /* Wigle-style CSV header if file is empty. */
     fseek(f, 0, SEEK_END);
     if (ftell(f) == 0) {
         fprintf(f,
@@ -362,7 +356,6 @@ esp_err_t nesso_wardrive_start(const nesso_wardrive_config_t *cfg)
     if (s_cfg.max_aps  == 0) s_cfg.max_aps  = 256;
 
     const char *path_stack = s_cfg.csv_path ? s_cfg.csv_path : "/storage/wardrive.csv";
-    /* Stable pointer for the logger task — strdup into a malloc'd string we own. */
     char *path_owned = strdup(path_stack);
     if (!path_owned) return ESP_ERR_NO_MEM;
 
@@ -388,13 +381,8 @@ esp_err_t nesso_wardrive_start(const nesso_wardrive_config_t *cfg)
     s_csv_lines      = 0;
     s_gps_fixes_used = 0;
 
-    /* Register a promisc subscriber. Pass filter=0 ("all frames") because
-     * the callback self-filters for beacons (buf[0]==0x80) and the
-     * WIFI_PROMIS_FILTER_MASK values are easy to get wrong with bare
-     * bit shifts. CPU cost of receiving extra frames is negligible — the
-     * callback returns in ~10 ns on non-beacon types. */
     ESP_RETURN_ON_ERROR(nesso_wifi_promisc_add_subscriber(wdr_rx_cb, NULL,
-                                                          0, /* all frames */
+                                                          0,
                                                           &s_sub_token),
                         TAG, "promisc add subscriber");
 
@@ -434,7 +422,6 @@ esp_err_t nesso_wardrive_stop(void)
         s_sub_token = 0;
     }
 
-    /* Give the tasks a beat to exit cleanly. */
     for (int i = 0; i < 20 && (s_hop_task || s_log_task); ++i) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
