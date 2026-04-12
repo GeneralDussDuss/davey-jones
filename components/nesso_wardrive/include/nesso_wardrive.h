@@ -108,6 +108,13 @@ typedef struct {
 esp_err_t nesso_wardrive_status(nesso_wardrive_status_t *out);
 
 /**
+ * Lock the channel-hop task to a specific channel. Pass ch=0 to resume
+ * normal hopping. Used by the deauth attack mode to stay on the target
+ * AP's channel while waiting for EAPOL reconnection.
+ */
+void nesso_wardrive_lock_channel(uint8_t ch);
+
+/**
  * Copy up to `max` observed APs into `out`. Useful for a UI snapshot.
  * `out_count` receives the number of entries actually copied.
  */

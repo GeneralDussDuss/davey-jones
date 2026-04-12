@@ -4,8 +4,9 @@ dependencies:
   idf:
     version: ">=5.3"
 
-  ## esp_lvgl_port brings in LVGL as its own public dependency.
-  ## Do NOT also specify lvgl/lvgl here — the component manager will
-  ## pull a version that esp_lvgl_port knows how to integrate.
   espressif/esp_lvgl_port:
     version: "^2.4.0"
+
+  ## FT5x06-family touch driver (covers FT6336 on the Nesso N1).
+  espressif/esp_lcd_touch_ft5x06:
+    version: "*"

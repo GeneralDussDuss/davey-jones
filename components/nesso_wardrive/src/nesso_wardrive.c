@@ -242,6 +242,22 @@ static void IRAM_ATTR wdr_rx_cb(const uint8_t *buf, uint16_t len,
     (void)xQueueSend(s_log_queue, &snap, 0);
 }
 
+/* ----- channel lock (for deauth mode) ----- */
+
+static volatile uint8_t s_locked_channel = 0;
+
+void nesso_wardrive_lock_channel(uint8_t ch)
+{
+    s_locked_channel = ch;
+    if (ch != 0) {
+        nesso_wifi_set_channel(ch);
+        s_current_channel = ch;
+        ESP_LOGI(TAG, "channel locked to %u", ch);
+    } else {
+        ESP_LOGI(TAG, "channel lock released");
+    }
+}
+
 /* ----- channel hop task ----- */
 
 static void hop_task(void *arg)
@@ -250,6 +266,11 @@ static void hop_task(void *arg)
     uint8_t ch = 1;
     const TickType_t period = pdMS_TO_TICKS(s_cfg.dwell_ms);
     while (s_running) {
+        /* If channel is locked (deauth mode), stay put. */
+        if (s_locked_channel) {
+            vTaskDelay(period);
+            continue;
+        }
         if (nesso_wifi_set_channel(ch) == ESP_OK) {
             s_current_channel = ch;
         }
