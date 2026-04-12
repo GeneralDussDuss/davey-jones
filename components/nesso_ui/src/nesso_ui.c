@@ -64,6 +64,7 @@ typedef enum {
     UI_WIFI_DEAUTH_SELECT,
     UI_WIFI_DEAUTH_ACTIVE,
     UI_WIFI_BEACON_SPAM,
+    UI_WIFI_DAVEYGOTCHI,
     UI_SUBGHZ_MENU,
     UI_IR_MENU,
 } ui_state_t;
@@ -303,12 +304,13 @@ static void build_main_menu(void)
 
 /* WiFi Menu */
 static const menu_item_t s_wifi_items[] = {
+    { "> Daveygotchi",  UI_WIFI_DAVEYGOTCHI },
     { "> Scan",         UI_WIFI_SCANNING },
     { "> AP List",      UI_WIFI_AP_LIST },
     { "> Deauth",       UI_WIFI_DEAUTH_SELECT },
     { "> Beacon Spam",  UI_WIFI_BEACON_SPAM },
 };
-#define WIFI_ITEM_COUNT 4
+#define WIFI_ITEM_COUNT 5
 
 /* WiFi AP List / Deauth Select (shared builder). */
 static void build_ap_list(const char *title, bool deauth_mode)
@@ -484,6 +486,199 @@ static void build_beacon_spam(void)
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
+/* -------------------- DAVEYGOTCHI -------------------- */
+
+typedef enum {
+    MOOD_LURKING,    /* scanning, no target */
+    MOOD_HUNTING,    /* locked onto target, deauthing */
+    MOOD_FEASTING,   /* just captured a PMKID */
+    MOOD_BORED,      /* nothing happening */
+    MOOD_SLEEPING,   /* idle for a long time */
+} davey_mood_t;
+
+static davey_mood_t  s_davey_mood        = MOOD_LURKING;
+static uint32_t      s_davey_start_ms    = 0;
+static uint32_t      s_davey_last_pmk    = 0;   /* pmkid count at last check */
+static uint32_t      s_davey_feast_until = 0;   /* timestamp to stop celebrating */
+static uint32_t      s_davey_hunt_until  = 0;   /* timestamp to stop hunting current target */
+static uint32_t      s_davey_next_hunt   = 0;   /* timestamp for next auto-target */
+static int           s_davey_target_idx  = -1;
+
+static const char *davey_face(davey_mood_t m)
+{
+    switch (m) {
+    case MOOD_LURKING:  return "   ( o_o )\n   /|   |\\";
+    case MOOD_HUNTING:  return "   ( >_< )\n   /|   |\\";
+    case MOOD_FEASTING: return "   ( ^_^ )\n   /|   |\\";
+    case MOOD_BORED:    return "   ( -_- )\n   /|   |\\";
+    case MOOD_SLEEPING: return "   ( u_u )\n    |   |";
+    }
+    return "   ( ?_? )";
+}
+
+static const char *davey_text(davey_mood_t m)
+{
+    switch (m) {
+    case MOOD_LURKING:  return "Lurking in the deep...";
+    case MOOD_HUNTING:  return "Found prey!";
+    case MOOD_FEASTING: return "FEAST! Got a key!";
+    case MOOD_BORED:    return "Nothing out here...";
+    case MOOD_SLEEPING: return "zzZZzz...";
+    }
+    return "...";
+}
+
+static void build_daveygotchi(void)
+{
+    s_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+
+    s_dyn_count = 0;
+
+    lv_obj_t *title = lv_label_create(s_screen);
+    lv_label_set_text(title, "DAVEYGOTCHI");
+    lv_obj_set_style_text_color(title, COL_MAGENTA, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+
+    /* Face — big and centered. */
+    lv_obj_t *face = lv_label_create(s_screen);
+    lv_label_set_text(face, davey_face(MOOD_LURKING));
+    lv_obj_set_style_text_color(face, COL_CYAN, 0);
+    lv_obj_align(face, LV_ALIGN_TOP_MID, 0, 28);
+    track(face); /* 0: face */
+
+    /* Mood text. */
+    lv_obj_t *mood = lv_label_create(s_screen);
+    lv_label_set_text(mood, davey_text(MOOD_LURKING));
+    lv_obj_set_style_text_color(mood, COL_YELLOW, 0);
+    lv_obj_set_style_text_align(mood, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(mood, LV_ALIGN_TOP_MID, 0, 75);
+    track(mood); /* 1: mood text */
+
+    /* Stats. */
+    int y = 100;
+    lv_obj_t *aps = make_label(s_screen, y, COL_CYAN, "APs: 0  PMK: 0"); y += 18;
+    track(aps); /* 2 */
+    lv_obj_t *tgt = make_label(s_screen, y, COL_CYAN, "Target: ---"); y += 18;
+    track(tgt); /* 3 */
+    lv_obj_t *ch = make_label(s_screen, y, COL_CYAN, "CH: --  BCN: 0"); y += 18;
+    track(ch); /* 4 */
+    lv_obj_t *up = make_label(s_screen, y, COL_CYAN, "Uptime: 0:00:00"); y += 18;
+    track(up); /* 5 */
+
+    lv_obj_t *hint = lv_label_create(s_screen);
+    lv_label_set_text(hint, "autonomous mode");
+    lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+
+    /* Init autonomous state. */
+    s_davey_mood = MOOD_LURKING;
+    s_davey_start_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    s_davey_next_hunt = s_davey_start_ms + 5000;  /* first hunt after 5s */
+    s_davey_target_idx = -1;
+
+    nesso_eapol_status_t es = {0};
+    nesso_eapol_status(&es);
+    s_davey_last_pmk = es.pmkids_captured;
+}
+
+static void refresh_daveygotchi(void)
+{
+    if (s_dyn_count < 6) return;
+
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+
+    nesso_wardrive_status_t ws = {0};
+    nesso_eapol_status_t es = {0};
+    nesso_wardrive_status(&ws);
+    nesso_eapol_status(&es);
+
+    /* Check if we got a new PMKID! */
+    if (es.pmkids_captured > s_davey_last_pmk) {
+        s_davey_mood = MOOD_FEASTING;
+        s_davey_feast_until = now + 8000;  /* celebrate for 8 seconds */
+        s_davey_last_pmk = es.pmkids_captured;
+        /* Stop current deauth — we got what we wanted. */
+        if (s_deauth_active) stop_deauth();
+        nesso_led(true);
+    }
+
+    /* State machine for autonomous hunting. */
+    if (s_davey_mood == MOOD_FEASTING && now > s_davey_feast_until) {
+        s_davey_mood = MOOD_LURKING;
+        nesso_led(false);
+    }
+
+    if (s_davey_mood == MOOD_HUNTING && now > s_davey_hunt_until) {
+        /* Hunting timeout — didn't get a PMKID. Move on. */
+        if (s_deauth_active) stop_deauth();
+        s_davey_mood = MOOD_BORED;
+        s_davey_next_hunt = now + 5000;  /* try another in 5s */
+    }
+
+    if (s_davey_mood == MOOD_BORED && now > s_davey_next_hunt) {
+        s_davey_mood = MOOD_LURKING;
+    }
+
+    /* Auto-target: pick strongest AP we haven't captured a PMKID from. */
+    if ((s_davey_mood == MOOD_LURKING) && now > s_davey_next_hunt && !s_deauth_active) {
+        refresh_ap_snapshot();
+        if (s_ap_snap_count > 0) {
+            /* Pick a target — cycle through APs. */
+            s_davey_target_idx = (s_davey_target_idx + 1) % (int)s_ap_snap_count;
+            start_deauth(s_davey_target_idx);
+            s_davey_mood = MOOD_HUNTING;
+            s_davey_hunt_until = now + 15000;  /* hunt for 15 seconds */
+            s_davey_next_hunt = now + 30000;   /* next hunt in 30s */
+        }
+    }
+
+    if (ws.total_aps == 0 && (now - s_davey_start_ms) > 30000) {
+        s_davey_mood = MOOD_SLEEPING;
+    }
+
+    /* Update display. */
+    lv_label_set_text(s_dyn_labels[0], davey_face(s_davey_mood));
+
+    /* Mood color varies. */
+    lv_color_t face_color;
+    switch (s_davey_mood) {
+    case MOOD_FEASTING: face_color = COL_GREEN; break;
+    case MOOD_HUNTING:  face_color = COL_RED; break;
+    case MOOD_BORED:    face_color = COL_WHITE; break;
+    default:            face_color = COL_CYAN; break;
+    }
+    lv_obj_set_style_text_color(s_dyn_labels[0], face_color, 0);
+
+    lv_label_set_text(s_dyn_labels[1], davey_text(s_davey_mood));
+
+    lv_label_set_text_fmt(s_dyn_labels[2], "APs: %u  PMK: %lu",
+                          (unsigned)ws.total_aps,
+                          (unsigned long)es.pmkids_captured);
+
+    if (s_deauth_active) {
+        char tgt[28];
+        snprintf(tgt, sizeof(tgt), ">> %.12s",
+                 s_deauth_ssid[0] ? s_deauth_ssid : "???");
+        lv_label_set_text(s_dyn_labels[3], tgt);
+        lv_obj_set_style_text_color(s_dyn_labels[3], COL_RED, 0);
+    } else {
+        lv_label_set_text(s_dyn_labels[3], "Target: scanning...");
+        lv_obj_set_style_text_color(s_dyn_labels[3], COL_CYAN, 0);
+    }
+
+    lv_label_set_text_fmt(s_dyn_labels[4], "CH: %u  BCN: %lu",
+                          ws.current_channel,
+                          (unsigned long)ws.beacons_parsed);
+
+    uint32_t uptime = (now - s_davey_start_ms) / 1000;
+    lv_label_set_text_fmt(s_dyn_labels[5], "Up: %lu:%02lu:%02lu",
+                          (unsigned long)(uptime / 3600),
+                          (unsigned long)((uptime % 3600) / 60),
+                          (unsigned long)(uptime % 60));
+}
+
 /* Placeholder screen. */
 static void build_placeholder(const char *title)
 {
@@ -539,6 +734,7 @@ static void navigate(ui_state_t state)
         nesso_wifi_beacon_spam_start(s_spam_list, SPAM_COUNT, 0);
         build_beacon_spam();
         break;
+    case UI_WIFI_DAVEYGOTCHI: build_daveygotchi(); break;
     case UI_SUBGHZ_MENU:      build_placeholder("SUB-GHZ"); break;
     case UI_IR_MENU:          build_placeholder("INFRARED"); break;
     }
@@ -590,6 +786,13 @@ static void handle_select(void)
 
     case UI_WIFI_BEACON_SPAM:
         nesso_wifi_beacon_spam_stop();
+        s_has_pending = true;
+        s_pending_nav = UI_WIFI_MENU;
+        break;
+
+    case UI_WIFI_DAVEYGOTCHI:
+        /* Double-tap on daveygotchi = exit. */
+        if (s_deauth_active) stop_deauth();
         s_has_pending = true;
         s_pending_nav = UI_WIFI_MENU;
         break;
@@ -655,6 +858,9 @@ static void refresh_cb(lv_timer_t *t)
         break;
     case UI_WIFI_DEAUTH_ACTIVE:
         refresh_deauth_active();
+        break;
+    case UI_WIFI_DAVEYGOTCHI:
+        refresh_daveygotchi();
         break;
     case UI_MAIN_MENU:
         /* Refresh stats line. */
@@ -754,6 +960,10 @@ static void button_task(void *arg)
                 break;
             case UI_WIFI_BEACON_SPAM:
                 nesso_wifi_beacon_spam_stop();
+                navigate(UI_WIFI_MENU);
+                break;
+            case UI_WIFI_DAVEYGOTCHI:
+                if (s_deauth_active) stop_deauth();
                 navigate(UI_WIFI_MENU);
                 break;
             case UI_SUBGHZ_MENU:
