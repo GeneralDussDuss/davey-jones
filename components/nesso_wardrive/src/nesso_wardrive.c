@@ -187,15 +187,6 @@ static void IRAM_ATTR wdr_rx_cb(const uint8_t *buf, uint16_t len,
 {
     (void)user;
     s_packets_seen++;
-
-    /* Debug: log the first 10 frames so we can see what's arriving. */
-    if (s_packets_seen <= 10) {
-        ESP_LOGI(TAG, "pkt #%lu: len=%u fc=0x%02x%02x ch=%u rssi=%d",
-                 (unsigned long)s_packets_seen, len,
-                 len > 0 ? buf[0] : 0, len > 1 ? buf[1] : 0,
-                 channel, rssi);
-    }
-
     if (len < 36) return;
 
     nesso_wardrive_ap_t parsed = {0};

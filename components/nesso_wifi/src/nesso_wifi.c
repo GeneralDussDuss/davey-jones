@@ -94,10 +94,13 @@ static uint32_t compute_filter_union(void)
 static esp_err_t apply_radio_filter(void)
 {
     uint32_t combined = compute_filter_union();
-    wifi_promiscuous_filter_t pf = {
-        /* 0 means "all frames" to esp_wifi as well. */
-        .filter_mask = combined,
-    };
+    /* OUR convention: 0 = "all frames".
+     * ESP-IDF convention: 0 = "capture nothing", 0xFFFFFFFF = "all frames".
+     * Map between the two. */
+    if (combined == 0) {
+        combined = WIFI_PROMIS_FILTER_MASK_ALL;
+    }
+    wifi_promiscuous_filter_t pf = { .filter_mask = combined };
     return esp_wifi_set_promiscuous_filter(&pf);
 }
 
@@ -151,6 +154,8 @@ esp_err_t nesso_wifi_promisc_add_subscriber(nesso_wifi_packet_cb_t cb,
         }
     }
 
+    /* Map our "0 = all frames" convention to ESP-IDF's 0xFFFFFFFF. */
+    if (prospective == 0) prospective = WIFI_PROMIS_FILTER_MASK_ALL;
     wifi_promiscuous_filter_t pf = { .filter_mask = prospective };
     esp_err_t err = esp_wifi_set_promiscuous_filter(&pf);
     if (err != ESP_OK) {

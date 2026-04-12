@@ -21,6 +21,8 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -35,6 +37,20 @@
 #include "nesso_wifi.h"
 
 static const char *TAG = "davey";
+
+/* Raw promisc test — bypasses our subscriber layer entirely. */
+static volatile uint32_t s_raw_pkt_count = 0;
+static void IRAM_ATTR raw_promisc_test(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+    s_raw_pkt_count++;
+    if (s_raw_pkt_count <= 5) {
+        const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
+        ESP_DRAM_LOGI("RAW", "pkt#%lu type=%d len=%d rssi=%d fc=0x%02x%02x",
+                      (unsigned long)s_raw_pkt_count, type,
+                      pkt->rx_ctrl.sig_len, pkt->rx_ctrl.rssi,
+                      pkt->payload[0], pkt->payload[1]);
+    }
+}
 
 /* Try to start a subsystem, log but don't fatal on failure. Returns true
  * on success so the caller can gate dependent subsystems. */
