@@ -40,6 +40,7 @@
 #include "nesso_wardrive.h"
 #include "nesso_eapol.h"
 #include "nesso_wifi.h"
+#include "nesso_ir.h"
 
 static const char *TAG = "nesso_ui";
 
@@ -67,6 +68,8 @@ typedef enum {
     UI_WIFI_DAVEYGOTCHI,
     UI_SUBGHZ_MENU,
     UI_IR_MENU,
+    UI_IR_TVBGONE,
+    UI_IR_SAMSUNG_REMOTE,
 } ui_state_t;
 
 static bool              s_up            = false;
@@ -104,6 +107,9 @@ static int       s_dyn_count = 0;
 /* Deferred navigation from touch callbacks. */
 static ui_state_t s_pending_nav = UI_SPLASH;
 static bool       s_has_pending = false;
+
+/* TV-B-Gone one-shot flag. */
+static bool s_tvbg_done = false;
 
 /* Beacon spam SSIDs. */
 static const char *s_spam_list[] = {
@@ -284,6 +290,13 @@ static const menu_item_t s_main_items[] = {
     { "> IR",      UI_IR_MENU },
 };
 #define MAIN_ITEM_COUNT 3
+
+/* IR Menu */
+static const menu_item_t s_ir_items[] = {
+    { "> TV-B-Gone",      UI_IR_TVBGONE },
+    { "> Samsung Remote",  UI_IR_SAMSUNG_REMOTE },
+};
+#define IR_ITEM_COUNT 2
 
 static void build_main_menu(void)
 {
@@ -719,6 +732,7 @@ static void build_scanning(void)
 
 static void navigate(ui_state_t state)
 {
+    s_tvbg_done = false;
     s_state = state;
     s_dyn_count = 0;
 
@@ -735,8 +749,60 @@ static void navigate(ui_state_t state)
         build_beacon_spam();
         break;
     case UI_WIFI_DAVEYGOTCHI: build_daveygotchi(); break;
+    case UI_IR_SAMSUNG_REMOTE:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        s_dyn_count = 0;
+        s_cursor = 0;
+
+        lv_obj_t *t = lv_label_create(s_screen);
+        lv_label_set_text(t, "SAMSUNG REMOTE");
+        lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
+        lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 2);
+
+        /* Remote buttons — scroll with KEY1, double-tap to send. */
+        static const char *btn_names[] = {
+            "Power", "Vol +", "Vol -", "Ch +", "Ch -",
+            "Mute", "Source", "Menu", "Home", "Return",
+        };
+        for (int i = 0; i < 10; ++i) {
+            lv_obj_t *row = make_label(s_screen, 22 + i * 20,
+                                        i == 0 ? COL_YELLOW : COL_CYAN,
+                                        btn_names[i]);
+            track(row);
+        }
+
+        lv_obj_t *hint = lv_label_create(s_screen);
+        lv_label_set_text(hint, "scroll + 2xtap:send");
+        lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
     case UI_SUBGHZ_MENU:      build_placeholder("SUB-GHZ"); break;
-    case UI_IR_MENU:          build_placeholder("INFRARED"); break;
+    case UI_IR_MENU:          build_menu("Infrared", s_ir_items, IR_ITEM_COUNT); break;
+    case UI_IR_TVBGONE:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        s_dyn_count = 0;
+        lv_obj_t *t = lv_label_create(s_screen);
+        lv_label_set_text(t, "TV-B-GONE");
+        lv_obj_set_style_text_color(t, COL_RED, 0);
+        lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 4);
+        lv_obj_t *msg = make_label(s_screen, 40, COL_YELLOW, "Sending power codes...");
+        track(msg);
+        lv_obj_t *cnt = make_label(s_screen, 65, COL_CYAN, "0 / 20");
+        track(cnt);
+        make_label(s_screen, 100, COL_WHITE, "Point at TV and wait");
+        lv_obj_t *hint = lv_label_create(s_screen);
+        lv_label_set_text(hint, "KEY2:cancel");
+        lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
     }
 
     /* Every screen gets the universal double-tap handler. */
@@ -797,6 +863,32 @@ static void handle_select(void)
         s_pending_nav = UI_WIFI_MENU;
         break;
 
+    case UI_IR_SAMSUNG_REMOTE:
+    {
+        /* Samsung TV IR codes (address 0x0707). */
+        static const uint8_t sam_cmds[] = {
+            0x02,  /* Power */
+            0x07,  /* Vol + */
+            0x0B,  /* Vol - */
+            0x12,  /* Ch + */
+            0x10,  /* Ch - */
+            0x0F,  /* Mute */
+            0x01,  /* Source */
+            0x1A,  /* Menu */
+            0x79,  /* Home / Smart Hub */
+            0x58,  /* Return */
+        };
+        if (s_cursor >= 0 && s_cursor < 10) {
+            if (!nesso_ir_is_ready()) nesso_ir_init();
+            nesso_ir_send_samsung(0x0707, sam_cmds[s_cursor]);
+            /* Brief LED flash as feedback. */
+            nesso_led(true);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            nesso_led(false);
+        }
+        break;
+    }
+
     case UI_SUBGHZ_MENU:
     case UI_IR_MENU:
         s_has_pending = true;
@@ -816,6 +908,7 @@ static const menu_item_t *current_menu_items(int *out_count)
     switch (s_state) {
     case UI_MAIN_MENU: *out_count = MAIN_ITEM_COUNT; return s_main_items;
     case UI_WIFI_MENU: *out_count = WIFI_ITEM_COUNT; return s_wifi_items;
+    case UI_IR_MENU:   *out_count = IR_ITEM_COUNT;   return s_ir_items;
     default: *out_count = 0; return NULL;
     }
 }
@@ -862,6 +955,22 @@ static void refresh_cb(lv_timer_t *t)
     case UI_WIFI_DAVEYGOTCHI:
         refresh_daveygotchi();
         break;
+    case UI_IR_TVBGONE:
+    {
+        /* Run TV-B-Gone in the refresh tick. Non-ideal (blocks LVGL)
+         * but simple. The whole thing takes ~3 seconds. */
+        if (!s_tvbg_done) {
+            s_tvbg_done = true;
+            if (!nesso_ir_is_ready()) nesso_ir_init();
+            int sent = nesso_ir_tvbgone();
+            if (s_dyn_count >= 2) {
+                lv_label_set_text(s_dyn_labels[0], "Done!");
+                lv_label_set_text_fmt(s_dyn_labels[1], "%d codes sent", sent);
+                lv_obj_set_style_text_color(s_dyn_labels[0], COL_GREEN, 0);
+            }
+        }
+        break;
+    }
     case UI_MAIN_MENU:
         /* Refresh stats line. */
         if (s_dyn_count > MAIN_ITEM_COUNT) {
@@ -923,6 +1032,7 @@ static void button_task(void *arg)
                 break;
             case UI_MAIN_MENU:
             case UI_WIFI_MENU:
+            case UI_IR_MENU:
             {
                 int count = 0;
                 current_menu_items(&count);
@@ -941,8 +1051,15 @@ static void button_task(void *arg)
                 refresh_ap_rows(true);
                 break;
             case UI_WIFI_DEAUTH_ACTIVE:
-                /* Scroll does nothing on attack screen — stop via KEY2 or long-press. */
                 break;
+            case UI_IR_SAMSUNG_REMOTE:
+            {
+                s_cursor = (s_cursor + 1) % 10;
+                for (int i = 0; i < s_dyn_count && i < 10; ++i)
+                    lv_obj_set_style_text_color(s_dyn_labels[i],
+                        i == s_cursor ? COL_YELLOW : COL_CYAN, 0);
+                break;
+            }
             default:
                 break;
             }
@@ -967,8 +1084,16 @@ static void button_task(void *arg)
                 navigate(UI_WIFI_MENU);
                 break;
             case UI_SUBGHZ_MENU:
+                navigate(UI_MAIN_MENU);
+                break;
             case UI_IR_MENU:
                 navigate(UI_MAIN_MENU);
+                break;
+            case UI_IR_TVBGONE:
+                navigate(UI_IR_MENU);
+                break;
+            case UI_IR_SAMSUNG_REMOTE:
+                navigate(UI_IR_MENU);
                 break;
             default:
                 break;
