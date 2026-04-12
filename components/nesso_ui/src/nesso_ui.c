@@ -43,6 +43,7 @@
 #include "nesso_ir.h"
 #include "nesso_subghz.h"
 #include "nesso_buzzer.h"
+#include "nesso_ble.h"
 
 static const char *TAG = "nesso_ui";
 
@@ -68,6 +69,13 @@ typedef enum {
     UI_WIFI_DEAUTH_ACTIVE,
     UI_WIFI_BEACON_SPAM,
     UI_WIFI_DAVEYGOTCHI,
+    UI_BT_MENU,
+    UI_BT_SCAN,
+    UI_BT_SPAM_APPLE,
+    UI_BT_SPAM_SAMSUNG,
+    UI_BT_SPAM_GOOGLE,
+    UI_BT_SPAM_WINDOWS,
+    UI_BT_SPAM_ALL,
     UI_SUBGHZ_MENU,
     UI_SUBGHZ_ANALYZER,
     UI_SUBGHZ_CAPTURE,
@@ -118,8 +126,9 @@ static bool       s_has_pending = false;
 /* Navigation direction — affects transition animation. */
 static bool s_nav_back = false;
 
-/* TV-B-Gone one-shot flag. */
+/* One-shot flags for blocking screens. */
 static bool s_tvbg_done = false;
+static bool s_bt_scan_done = false;
 
 /* Beacon spam SSIDs. */
 static const char *s_spam_list[] = {
@@ -358,11 +367,23 @@ static void build_menu(const char *title, const menu_item_t *items, int count)
 
 /* Main Menu */
 static const menu_item_t s_main_items[] = {
-    { "> WiFi",    UI_WIFI_MENU },
-    { "> Sub-GHz", UI_SUBGHZ_MENU },
-    { "> IR",      UI_IR_MENU },
+    { "> WiFi",      UI_WIFI_MENU },
+    { "> Bluetooth", UI_BT_MENU },
+    { "> Sub-GHz",   UI_SUBGHZ_MENU },
+    { "> IR",        UI_IR_MENU },
 };
-#define MAIN_ITEM_COUNT 3
+#define MAIN_ITEM_COUNT 4
+
+/* Bluetooth Menu */
+static const menu_item_t s_bt_items[] = {
+    { "> BLE Scan",       UI_BT_SCAN },
+    { "> Spam: Apple",    UI_BT_SPAM_APPLE },
+    { "> Spam: Samsung",  UI_BT_SPAM_SAMSUNG },
+    { "> Spam: Google",   UI_BT_SPAM_GOOGLE },
+    { "> Spam: Windows",  UI_BT_SPAM_WINDOWS },
+    { "> Spam: ALL",      UI_BT_SPAM_ALL },
+};
+#define BT_ITEM_COUNT 6
 
 /* Sub-GHz Menu */
 static const menu_item_t s_subghz_items[] = {
@@ -865,6 +886,7 @@ static void build_scanning(void)
 static void navigate(ui_state_t state)
 {
     s_tvbg_done = false;
+    s_bt_scan_done = false;
 
     /* Reset landscape rotation if leaving analyzer. */
     if (s_state == UI_SUBGHZ_ANALYZER && state != UI_SUBGHZ_ANALYZER) {
@@ -941,6 +963,57 @@ static void navigate(ui_state_t state)
         lv_label_set_text(hint, "KEY2:stop");
         lv_obj_set_style_text_color(hint, COL_WHITE, 0);
         lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
+    case UI_BT_MENU:
+        build_menu("Bluetooth", s_bt_items, BT_ITEM_COUNT);
+        break;
+    case UI_BT_SCAN:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "BLE SCAN");
+        s_dyn_count = 0;
+        lv_obj_t *st = make_label(s_screen, 30, COL_YELLOW, "Scanning 5s...");
+        track(st);
+        break;
+    }
+    case UI_BT_SPAM_APPLE:
+    case UI_BT_SPAM_SAMSUNG:
+    case UI_BT_SPAM_GOOGLE:
+    case UI_BT_SPAM_WINDOWS:
+    case UI_BT_SPAM_ALL:
+    {
+        static const char *spam_names[] = {
+            [UI_BT_SPAM_APPLE - UI_BT_SPAM_APPLE]   = "APPLE SPAM",
+            [UI_BT_SPAM_SAMSUNG - UI_BT_SPAM_APPLE]  = "SAMSUNG SPAM",
+            [UI_BT_SPAM_GOOGLE - UI_BT_SPAM_APPLE]   = "GOOGLE SPAM",
+            [UI_BT_SPAM_WINDOWS - UI_BT_SPAM_APPLE]  = "WINDOWS SPAM",
+            [UI_BT_SPAM_ALL - UI_BT_SPAM_APPLE]      = "SPAM ALL",
+        };
+        nesso_ble_spam_type_t t = (nesso_ble_spam_type_t)(state - UI_BT_SPAM_APPLE);
+
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, spam_names[state - UI_BT_SPAM_APPLE]);
+        s_dyn_count = 0;
+        make_label(s_screen, 40, COL_RED, "Broadcasting...");
+        make_label(s_screen, 65, COL_CYAN,
+            t == BLE_SPAM_APPLE   ? "Fake AirPod popups" :
+            t == BLE_SPAM_SAMSUNG ? "SmartTag notifications" :
+            t == BLE_SPAM_GOOGLE  ? "Fast Pair popups" :
+            t == BLE_SPAM_WINDOWS ? "Swift Pair popups" :
+                                    "All platforms");
+        lv_obj_t *hint = lv_label_create(s_screen);
+        lv_label_set_text(hint, "KEY2:stop");
+        lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+        lv_obj_set_style_opa(hint, LV_OPA_60, 0);
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+
+        if (!nesso_ble_is_ready()) nesso_ble_init();
+        nesso_ble_spam_start(t);
         break;
     }
     case UI_SUBGHZ_MENU:
@@ -1093,6 +1166,7 @@ static void handle_select(void)
     case UI_MAIN_MENU:
     case UI_WIFI_MENU:
     case UI_IR_MENU:
+    case UI_BT_MENU:
     case UI_SUBGHZ_MENU:
         if (items && s_cursor < count) {
             s_has_pending = true;
@@ -1178,6 +1252,7 @@ static const menu_item_t *current_menu_items(int *out_count)
     case UI_MAIN_MENU: *out_count = MAIN_ITEM_COUNT; return s_main_items;
     case UI_WIFI_MENU: *out_count = WIFI_ITEM_COUNT; return s_wifi_items;
     case UI_IR_MENU:     *out_count = IR_ITEM_COUNT;     return s_ir_items;
+    case UI_BT_MENU:     *out_count = BT_ITEM_COUNT;     return s_bt_items;
     case UI_SUBGHZ_MENU: *out_count = SUBGHZ_ITEM_COUNT; return s_subghz_items;
     default: *out_count = 0; return NULL;
     }
@@ -1261,6 +1336,33 @@ static void refresh_cb(lv_timer_t *t)
                                         blink ? COL_RED : COL_YELLOW, 0);
         }
         nesso_led(s_tvbg_rounds % 2 == 0);
+        break;
+    }
+    case UI_BT_SCAN:
+    {
+        if (!s_bt_scan_done) {
+            s_bt_scan_done = true;
+            if (!nesso_ble_is_ready()) nesso_ble_init();
+            nesso_ble_scan_result_t result;
+            nesso_ble_scan(5, &result);
+            if (s_dyn_count >= 1) {
+                char buf[200] = "";
+                int off = 0;
+                for (size_t i = 0; i < result.count && i < 8; ++i) {
+                    const char *name = result.devices[i].name[0]
+                        ? result.devices[i].name : "Unknown";
+                    off += snprintf(buf + off, sizeof(buf) - off,
+                        "%-12.12s %ddBm\n", name, result.devices[i].rssi);
+                }
+                if (result.count > 8)
+                    snprintf(buf + off, sizeof(buf) - off, "+%zu more", result.count - 8);
+                else if (result.count == 0)
+                    snprintf(buf, sizeof(buf), "No devices found");
+                lv_label_set_text(s_dyn_labels[0], buf);
+                lv_obj_set_style_text_color(s_dyn_labels[0],
+                    result.count > 0 ? COL_CYAN : COL_RED, 0);
+            }
+        }
         break;
     }
     case UI_SUBGHZ_ANALYZER:
@@ -1424,6 +1526,7 @@ static void button_task(void *arg)
             case UI_MAIN_MENU:
             case UI_WIFI_MENU:
             case UI_IR_MENU:
+            case UI_BT_MENU:
             case UI_SUBGHZ_MENU:
             {
                 int count = 0;
@@ -1475,6 +1578,20 @@ static void button_task(void *arg)
             case UI_WIFI_DAVEYGOTCHI:
                 if (s_deauth_active) stop_deauth();
                 navigate(UI_WIFI_MENU);
+                break;
+            case UI_BT_MENU:
+                navigate(UI_MAIN_MENU);
+                break;
+            case UI_BT_SCAN:
+                navigate(UI_BT_MENU);
+                break;
+            case UI_BT_SPAM_APPLE:
+            case UI_BT_SPAM_SAMSUNG:
+            case UI_BT_SPAM_GOOGLE:
+            case UI_BT_SPAM_WINDOWS:
+            case UI_BT_SPAM_ALL:
+                nesso_ble_spam_stop();
+                navigate(UI_BT_MENU);
                 break;
             case UI_SUBGHZ_MENU:
                 navigate(UI_MAIN_MENU);

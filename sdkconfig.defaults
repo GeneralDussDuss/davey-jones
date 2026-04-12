@@ -59,6 +59,14 @@ CONFIG_FREERTOS_HZ=1000
 # it has no USB-UART bridge — it uses the ESP32-C6's built-in USB JTAG.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# --- Bluetooth (BLE only, no classic) --------------------------------
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+
 # --- LWIP / WiFi buffers (early defaults — will tune for WiFi work later)-
 CONFIG_LWIP_MAX_SOCKETS=10
 
