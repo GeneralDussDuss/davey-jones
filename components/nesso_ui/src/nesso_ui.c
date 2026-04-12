@@ -115,6 +115,9 @@ static int       s_dyn_count = 0;
 static ui_state_t s_pending_nav = UI_SPLASH;
 static bool       s_has_pending = false;
 
+/* Navigation direction — affects transition animation. */
+static bool s_nav_back = false;
+
 /* TV-B-Gone one-shot flag. */
 static bool s_tvbg_done = false;
 
@@ -256,17 +259,37 @@ static void build_splash(void)
                          LV_COLOR_FORMAT_RGB565);
     lv_obj_align(canvas, LV_ALIGN_TOP_MID, 0, 0);
 
-    /* Title overlaid on the image. */
+    /* Title overlaid on the image — fades in after 500ms. */
     lv_obj_t *title = lv_label_create(s_screen);
     lv_label_set_text(title, "DAVEY JONES");
     lv_obj_set_style_text_color(title, COL_MAGENTA, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 205);
+    lv_obj_set_style_opa(title, LV_OPA_TRANSP, 0);
+
+    lv_anim_t a1;
+    lv_anim_init(&a1);
+    lv_anim_set_var(&a1, title);
+    lv_anim_set_values(&a1, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&a1, 800);
+    lv_anim_set_delay(&a1, 500);
+    lv_anim_set_exec_cb(&a1, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
+    lv_anim_start(&a1);
 
     lv_obj_t *sub = lv_label_create(s_screen);
     lv_label_set_text(sub, "v0.1 // tap to start");
     lv_obj_set_style_text_color(sub, COL_CYAN, 0);
     lv_obj_align(sub, LV_ALIGN_BOTTOM_MID, 0, -4);
+    lv_obj_set_style_opa(sub, LV_OPA_TRANSP, 0);
+
+    lv_anim_t a2;
+    lv_anim_init(&a2);
+    lv_anim_set_var(&a2, sub);
+    lv_anim_set_values(&a2, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&a2, 600);
+    lv_anim_set_delay(&a2, 1200);
+    lv_anim_set_exec_cb(&a2, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
+    lv_anim_start(&a2);
 }
 
 /* Menu item builder helper (typedef is above, near forward declarations). */
@@ -945,7 +968,31 @@ static void navigate(ui_state_t state)
     if (s_screen) {
         lv_obj_add_flag(s_screen, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(s_screen, screen_tapped, LV_EVENT_CLICKED, NULL);
-        lv_scr_load(s_screen);
+
+        /* Smooth animated transitions. Back = slide right, forward = slide left. */
+        lv_scr_load_anim_t anim;
+        uint32_t dur = 200;
+
+        if (state == UI_SPLASH) {
+            anim = LV_SCR_LOAD_ANIM_FADE_IN;
+            dur = 400;
+        } else if (state == UI_MAIN_MENU && s_nav_back) {
+            anim = LV_SCR_LOAD_ANIM_MOVE_RIGHT;
+            dur = 250;
+        } else if (state == UI_MAIN_MENU) {
+            anim = LV_SCR_LOAD_ANIM_FADE_IN;
+            dur = 300;
+        } else if (s_nav_back) {
+            anim = LV_SCR_LOAD_ANIM_MOVE_RIGHT;
+        } else if (state == UI_WIFI_DEAUTH_ACTIVE || state == UI_WIFI_DAVEYGOTCHI ||
+                   state == UI_SUBGHZ_ANALYZER || state == UI_WIFI_BEACON_SPAM) {
+            anim = LV_SCR_LOAD_ANIM_OVER_TOP;
+        } else {
+            anim = LV_SCR_LOAD_ANIM_MOVE_LEFT;
+        }
+
+        s_nav_back = false;
+        lv_scr_load_anim(s_screen, anim, dur, 0, true);
     }
 }
 
@@ -1315,7 +1362,8 @@ static void button_task(void *arg)
                 break;
             }
         } else if (evt.key == NESSO_KEY2) {
-            /* KEY2 = back everywhere. */
+            /* KEY2 = back everywhere. Set back flag for slide-right animation. */
+            s_nav_back = true;
             switch (s_state) {
             case UI_SPLASH:         navigate(UI_MAIN_MENU); break;
             case UI_MAIN_MENU:      /* top level — no back */ break;
