@@ -156,13 +156,15 @@ static void aps_screen_tapped(lv_event_t *e)
     (void)e;
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (s_last_tap_ms && (now - s_last_tap_ms) < DOUBLE_TAP_MS) {
-        /* Double tap — toggle deauth on highlighted AP. */
+        /* Double tap — start deauth + switch to attack view. */
         if (s_deauth_active) {
             stop_deauth();
+            /* Stay on APS view after stopping. */
         } else if (s_ap_snap_count > 0) {
             start_deauth(s_aps_cursor);
+            show_view_locked(NESSO_UI_VIEW_ATTACK);
         }
-        s_last_tap_ms = 0;  /* reset so triple-tap doesn't re-trigger */
+        s_last_tap_ms = 0;
     } else {
         s_last_tap_ms = now;
     }
