@@ -200,29 +200,26 @@ static void stop_deauth(void)
     nesso_wardrive_lock_channel(0);
 }
 
-/* -------------------- touch callbacks -------------------- */
+/* -------------------- universal double-tap select -------------------- */
 
-static void splash_tapped(lv_event_t *e)
-{
-    (void)e;
-    s_has_pending = true;
-    s_pending_nav = UI_MAIN_MENU;
-}
+static uint32_t s_last_tap_ms = 0;
+#define DOUBLE_TAP_MS 500
 
-static uint32_t s_last_deauth_tap = 0;
-static void deauth_select_tapped(lv_event_t *e)
+/* Menu item type — needed for forward declarations. */
+typedef struct { const char *label; ui_state_t target; } menu_item_t;
+
+static void handle_select(void);
+static const menu_item_t *current_menu_items(int *out_count);
+
+static void screen_tapped(lv_event_t *e)
 {
     (void)e;
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
-    if (s_last_deauth_tap && (now - s_last_deauth_tap) < 500) {
-        if (s_ap_snap_count > 0 && !s_deauth_active) {
-            start_deauth(s_cursor);
-            s_has_pending = true;
-            s_pending_nav = UI_WIFI_DEAUTH_ACTIVE;
-        }
-        s_last_deauth_tap = 0;
+    if (s_last_tap_ms && (now - s_last_tap_ms) < DOUBLE_TAP_MS) {
+        handle_select();
+        s_last_tap_ms = 0;
     } else {
-        s_last_deauth_tap = now;
+        s_last_tap_ms = now;
     }
 }
 
@@ -248,13 +245,10 @@ static void build_splash(void)
     lv_obj_set_style_text_color(sub, COL_CYAN, 0);
     lv_obj_align(sub, LV_ALIGN_CENTER, 0, 30);
 
-    /* Tap anywhere to proceed. */
-    lv_obj_add_flag(s_screen, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_screen, splash_tapped, LV_EVENT_CLICKED, NULL);
+    /* Universal tap handler added by navigate(). */
 }
 
-/* Menu item builder helper. */
-typedef struct { const char *label; ui_state_t target; } menu_item_t;
+/* Menu item builder helper (typedef is above, near forward declarations). */
 
 static void build_menu(const char *title, const menu_item_t *items, int count)
 {
@@ -277,7 +271,7 @@ static void build_menu(const char *title, const menu_item_t *items, int count)
     }
 
     lv_obj_t *hint = lv_label_create(s_screen);
-    lv_label_set_text(hint, "KEY1:sel  KEY2:back");
+    lv_label_set_text(hint, "btn:scroll  2xtap:sel");
     lv_obj_set_style_text_color(hint, COL_WHITE, 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
@@ -344,10 +338,7 @@ static void build_ap_list(const char *title, bool deauth_mode)
     track(status);  /* index = AP_VIEW_ROWS (last tracked) */
 
     /* Touch double-tap for deauth mode. */
-    if (deauth_mode) {
-        lv_obj_add_flag(s_screen, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(s_screen, deauth_select_tapped, LV_EVENT_CLICKED, NULL);
-    }
+    /* Universal tap handler added by navigate(). */
 }
 
 static void refresh_ap_rows(bool deauth_mode)
@@ -552,7 +543,66 @@ static void navigate(ui_state_t state)
     case UI_IR_MENU:          build_placeholder("INFRARED"); break;
     }
 
-    if (s_screen) lv_scr_load(s_screen);
+    /* Every screen gets the universal double-tap handler. */
+    if (s_screen) {
+        lv_obj_add_flag(s_screen, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(s_screen, screen_tapped, LV_EVENT_CLICKED, NULL);
+        lv_scr_load(s_screen);
+    }
+}
+
+/*
+ * Universal "select" action — triggered by double-tap on any screen.
+ * Does the right thing based on current state.
+ */
+static void handle_select(void)
+{
+    int count = 0;
+    const menu_item_t *items = current_menu_items(&count);
+
+    switch (s_state) {
+    case UI_SPLASH:
+        s_has_pending = true;
+        s_pending_nav = UI_MAIN_MENU;
+        break;
+
+    case UI_MAIN_MENU:
+    case UI_WIFI_MENU:
+        if (items && s_cursor < count) {
+            s_has_pending = true;
+            s_pending_nav = items[s_cursor].target;
+        }
+        break;
+
+    case UI_WIFI_DEAUTH_SELECT:
+        if (s_ap_snap_count > 0 && !s_deauth_active) {
+            start_deauth(s_cursor);
+            s_has_pending = true;
+            s_pending_nav = UI_WIFI_DEAUTH_ACTIVE;
+        }
+        break;
+
+    case UI_WIFI_DEAUTH_ACTIVE:
+        stop_deauth();
+        s_has_pending = true;
+        s_pending_nav = UI_WIFI_DEAUTH_SELECT;
+        break;
+
+    case UI_WIFI_BEACON_SPAM:
+        nesso_wifi_beacon_spam_stop();
+        s_has_pending = true;
+        s_pending_nav = UI_WIFI_MENU;
+        break;
+
+    case UI_SUBGHZ_MENU:
+    case UI_IR_MENU:
+        s_has_pending = true;
+        s_pending_nav = UI_MAIN_MENU;
+        break;
+
+    default:
+        break;
+    }
 }
 
 /* -------------------- menu navigation logic -------------------- */
@@ -637,7 +687,15 @@ static void button_task(void *arg)
     while (1) {
         if (xQueueReceive(q, &evt, portMAX_DELAY) != pdTRUE) continue;
 
-        /* Long-press KEY1 from anywhere = emergency stop + main menu. */
+        /*
+         * UNIVERSAL CONTROLS:
+         *   KEY1 press     = scroll down
+         *   KEY2 press     = back
+         *   KEY1 long      = emergency stop + main menu
+         *   Double-tap     = select (handled by touch callback)
+         */
+
+        /* Emergency stop. */
         if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
             lvgl_port_lock(0);
             if (s_deauth_active) stop_deauth();
@@ -647,93 +705,64 @@ static void button_task(void *arg)
             continue;
         }
 
-        if (evt.type != NESSO_BTN_EVT_PRESS && evt.type != NESSO_BTN_EVT_LONG_PRESS)
-            continue;
+        if (evt.type != NESSO_BTN_EVT_PRESS) continue;
 
         lvgl_port_lock(0);
 
-        switch (s_state) {
-
-        case UI_SPLASH:
-            /* Any key → main menu. */
-            navigate(UI_MAIN_MENU);
-            break;
-
-        case UI_MAIN_MENU:
-        case UI_WIFI_MENU:
-        {
-            int count = 0;
-            const menu_item_t *items = current_menu_items(&count);
-            if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_PRESS) {
-                /* Select item. */
-                if (items && s_cursor < count) {
-                    navigate(items[s_cursor].target);
-                }
-            } else if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_PRESS) {
-                if (s_state == UI_WIFI_MENU) {
-                    navigate(UI_MAIN_MENU);
-                }
-                /* Main menu: KEY2 does nothing (top level). */
-            } else if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
-                /* Already handled above. */
-            } else if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
-                /* Scroll down in menu. */
+        if (evt.key == NESSO_KEY1) {
+            /* KEY1 = scroll down everywhere. */
+            switch (s_state) {
+            case UI_SPLASH:
+                navigate(UI_MAIN_MENU);
+                break;
+            case UI_MAIN_MENU:
+            case UI_WIFI_MENU:
+            {
+                int count = 0;
+                current_menu_items(&count);
                 if (count > 0) {
                     s_cursor = (s_cursor + 1) % count;
                     update_menu_cursor(count);
                 }
+                break;
             }
-            break;
-        }
-
-        case UI_WIFI_AP_LIST:
-            if (evt.key == NESSO_KEY1) {
+            case UI_WIFI_AP_LIST:
                 s_cursor = (s_cursor + 1) % (s_ap_snap_count > 0 ? (int)s_ap_snap_count : 1);
                 refresh_ap_rows(false);
-            } else if (evt.key == NESSO_KEY2) {
-                navigate(UI_WIFI_MENU);
-            }
-            break;
-
-        case UI_WIFI_DEAUTH_SELECT:
-            if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_PRESS) {
-                /* Scroll. */
+                break;
+            case UI_WIFI_DEAUTH_SELECT:
                 s_cursor = (s_cursor + 1) % (s_ap_snap_count > 0 ? (int)s_ap_snap_count : 1);
                 refresh_ap_rows(true);
-            } else if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
-                /* Long-press KEY2 = attack. */
-                if (s_ap_snap_count > 0 && !s_deauth_active) {
-                    start_deauth(s_cursor);
-                    navigate(UI_WIFI_DEAUTH_ACTIVE);
-                }
-            } else if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_PRESS) {
-                navigate(UI_WIFI_MENU);
+                break;
+            case UI_WIFI_DEAUTH_ACTIVE:
+                /* Scroll does nothing on attack screen — stop via KEY2 or long-press. */
+                break;
+            default:
+                break;
             }
-            break;
-
-        case UI_WIFI_DEAUTH_ACTIVE:
-            if (evt.key == NESSO_KEY1) {
-                stop_deauth();
-                navigate(UI_WIFI_DEAUTH_SELECT);
-            } else if (evt.key == NESSO_KEY2) {
-                navigate(UI_WIFI_DEAUTH_SELECT);
-            }
-            break;
-
-        case UI_WIFI_BEACON_SPAM:
-            if (evt.key == NESSO_KEY2 || evt.key == NESSO_KEY1) {
+        } else if (evt.key == NESSO_KEY2) {
+            /* KEY2 = back everywhere. */
+            switch (s_state) {
+            case UI_SPLASH:         navigate(UI_MAIN_MENU); break;
+            case UI_MAIN_MENU:      /* top level — no back */ break;
+            case UI_WIFI_MENU:      navigate(UI_MAIN_MENU); break;
+            case UI_WIFI_SCANNING:  navigate(UI_WIFI_MENU); break;
+            case UI_WIFI_AP_LIST:   navigate(UI_WIFI_MENU); break;
+            case UI_WIFI_DEAUTH_SELECT: navigate(UI_WIFI_MENU); break;
+            case UI_WIFI_DEAUTH_ACTIVE:
+                navigate(UI_WIFI_DEAUTH_SELECT); /* back to target list, attack keeps running */
+                break;
+            case UI_WIFI_BEACON_SPAM:
                 nesso_wifi_beacon_spam_stop();
                 navigate(UI_WIFI_MENU);
+                break;
+            case UI_SUBGHZ_MENU:
+            case UI_IR_MENU:
+                navigate(UI_MAIN_MENU);
+                break;
+            default:
+                break;
             }
-            break;
-
-        case UI_SUBGHZ_MENU:
-        case UI_IR_MENU:
-            if (evt.key == NESSO_KEY2) navigate(UI_MAIN_MENU);
-            break;
-
-        default:
-            break;
         }
 
         lvgl_port_unlock();
