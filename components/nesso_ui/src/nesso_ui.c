@@ -294,29 +294,62 @@ static void build_splash(void)
 
 /* Menu item builder helper (typedef is above, near forward declarations). */
 
+/* Styled title bar with accent line. */
+static void make_title_bar(lv_obj_t *parent, const char *title)
+{
+    /* Title text. */
+    lv_obj_t *t = lv_label_create(parent);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 6);
+
+    /* Accent line under title. */
+    static lv_point_precise_t line_pts[] = {{0, 0}, {125, 0}};
+    lv_obj_t *line = lv_line_create(parent);
+    lv_line_set_points(line, line_pts, 2);
+    lv_obj_set_style_line_color(line, COL_MAGENTA, 0);
+    lv_obj_set_style_line_width(line, 2, 0);
+    lv_obj_set_style_line_opa(line, LV_OPA_70, 0);
+    lv_obj_align(line, LV_ALIGN_TOP_MID, 0, 22);
+}
+
 static void build_menu(const char *title, const menu_item_t *items, int count)
 {
     s_screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
     lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
 
-    lv_obj_t *t = lv_label_create(s_screen);
-    lv_label_set_text(t, title);
-    lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
-    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 4);
+    make_title_bar(s_screen, title);
 
     s_cursor = 0;
     s_dyn_count = 0;
     for (int i = 0; i < count && i < 10; ++i) {
-        lv_obj_t *row = make_label(s_screen, 28 + i * 22,
-                                    i == 0 ? COL_YELLOW : COL_CYAN,
-                                    items[i].label);
-        track(row);
+        /* Each menu item is a container with padding for the highlight bg. */
+        lv_obj_t *row = lv_obj_create(s_screen);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, 125, 24);
+        lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 28 + i * 26);
+
+        /* Highlight background — only visible on selected item. */
+        if (i == 0) {
+            lv_obj_set_style_bg_color(row, COL_MAGENTA, 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_30, 0);
+            lv_obj_set_style_radius(row, 4, 0);
+        }
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_label_set_text(lbl, items[i].label);
+        lv_obj_set_style_text_color(lbl, i == 0 ? COL_YELLOW : COL_CYAN, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 4, 0);
+
+        track(row);  /* track the container, not the label */
     }
 
+    /* Hint with subtle styling. */
     lv_obj_t *hint = lv_label_create(s_screen);
     lv_label_set_text(hint, "btn:scroll  2xtap:sel");
     lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+    lv_obj_set_style_opa(hint, LV_OPA_60, 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
@@ -385,28 +418,21 @@ static void build_ap_list(const char *title, bool deauth_mode)
     lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
     lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
 
-    lv_obj_t *t = lv_label_create(s_screen);
-    lv_label_set_text(t, title);
-    lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
-    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 2);
+    make_title_bar(s_screen, title);
 
     s_dyn_count = 0;
     s_cursor = 0;
     refresh_ap_snapshot();
 
     for (int i = 0; i < AP_VIEW_ROWS; ++i) {
-        lv_obj_t *row = make_label(s_screen, 20 + i * 22, COL_CYAN, "");
+        lv_obj_t *row = make_label(s_screen, 28 + i * 22, COL_CYAN, "");
         track(row);
     }
 
-    /* Status / hint at bottom. */
-    lv_obj_t *status = make_label(s_screen, 20 + AP_VIEW_ROWS * 22 + 2, COL_WHITE,
-                                   deauth_mode ? "KEY1:sel KEY2:back 2xtap:go"
-                                               : "KEY1:scroll  KEY2:back");
-    track(status);  /* index = AP_VIEW_ROWS (last tracked) */
-
-    /* Touch double-tap for deauth mode. */
-    /* Universal tap handler added by navigate(). */
+    lv_obj_t *status = make_label(s_screen, 28 + AP_VIEW_ROWS * 22 + 4, COL_WHITE,
+                                   deauth_mode ? "2xtap: attack" : "");
+    lv_obj_set_style_opa(status, LV_OPA_60, 0);
+    track(status);
 }
 
 static void refresh_ap_rows(bool deauth_mode)
@@ -572,24 +598,74 @@ static int           s_davey_target_idx  = -1;
 
 static const char *davey_face(davey_mood_t m)
 {
+    static bool blink = false;
+    blink = !blink;  /* alternates each refresh (250ms) */
+
     switch (m) {
-    case MOOD_LURKING:  return "   ( o_o )\n   /|   |\\";
-    case MOOD_HUNTING:  return "   ( >_< )\n   /|   |\\";
-    case MOOD_FEASTING: return "   ( ^_^ )\n   /|   |\\";
-    case MOOD_BORED:    return "   ( -_- )\n   /|   |\\";
-    case MOOD_SLEEPING: return "   ( u_u )\n    |   |";
+    case MOOD_LURKING:
+        return blink ?
+            "    /\\_/\\\n"
+            "   ( o.o )\n"
+            "   />   <\\\n"
+            "  /|     |\\"
+            :
+            "    /\\_/\\\n"
+            "   ( -.- )\n"  /* blink */
+            "   />   <\\\n"
+            "  /|     |\\";
+    case MOOD_HUNTING:
+        return
+            "    /\\_/\\\n"
+            "   ( >.< )\n"
+            "   />|||<\\\n"
+            "  /|  |  |\\";
+    case MOOD_FEASTING:
+        return blink ?
+            "    /\\_/\\\n"
+            "   ( ^.^ )\n"
+            "   />   <\\\n"
+            "  /| ~~~ |\\"
+            :
+            "    /\\_/\\\n"
+            "   ( ^o^ )\n"
+            "   />   <\\\n"
+            "  /| ~~~ |\\";
+    case MOOD_BORED:
+        return
+            "    /\\_/\\\n"
+            "   ( -.- )\n"
+            "   />   <\\\n"
+            "   |     |";
+    case MOOD_SLEEPING:
+        return
+            "    /\\_/\\\n"
+            "   ( u.u )\n"
+            "    >   <\n"
+            "    | z |";
     }
-    return "   ( ?_? )";
+    return "   ( ?.? )";
 }
 
 static const char *davey_text(davey_mood_t m)
 {
+    /* Multiple texts per mood for variety. */
+    static uint8_t variant = 0;
+    variant++;
+
     switch (m) {
-    case MOOD_LURKING:  return "Lurking in the deep...";
-    case MOOD_HUNTING:  return "Found prey!";
-    case MOOD_FEASTING: return "FEAST! Got a key!";
-    case MOOD_BORED:    return "Nothing out here...";
-    case MOOD_SLEEPING: return "zzZZzz...";
+    case MOOD_LURKING:
+        return (variant & 3) == 0 ? "Lurking in the deep..."
+             : (variant & 3) == 1 ? "Scanning the abyss..."
+             : (variant & 3) == 2 ? "Searching for prey..."
+             :                      "Eyes on the horizon...";
+    case MOOD_HUNTING:
+        return (variant & 1) ? "FOUND PREY!" : "Attacking...";
+    case MOOD_FEASTING:
+        return (variant & 1) ? "FEAST! Got a key!" : "Treasure acquired!";
+    case MOOD_BORED:
+        return (variant & 1) ? "Nothing out here..." : "The sea is quiet...";
+    case MOOD_SLEEPING:
+        return "zzZZzzZZzz...";
     }
     return "...";
 }
@@ -1108,8 +1184,23 @@ static const menu_item_t *current_menu_items(int *out_count)
 static void update_menu_cursor(int item_count)
 {
     for (int i = 0; i < item_count && i < s_dyn_count; ++i) {
-        lv_obj_set_style_text_color(s_dyn_labels[i],
-            i == s_cursor ? COL_YELLOW : COL_CYAN, 0);
+        bool sel = (i == s_cursor);
+        lv_obj_t *row = s_dyn_labels[i];
+
+        /* Highlight background on selected item. */
+        if (sel) {
+            lv_obj_set_style_bg_color(row, COL_MAGENTA, 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_30, 0);
+            lv_obj_set_style_radius(row, 4, 0);
+        } else {
+            lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        }
+
+        /* Update text color on the label child. */
+        lv_obj_t *lbl = lv_obj_get_child(row, 0);
+        if (lbl) {
+            lv_obj_set_style_text_color(lbl, sel ? COL_YELLOW : COL_CYAN, 0);
+        }
     }
 }
 
