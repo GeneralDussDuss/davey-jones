@@ -76,8 +76,10 @@ esp_err_t nesso_subghz_sweep(subghz_band_t band, subghz_spectrum_t *out)
         /* Dwell 2ms: PLL lock (~500µs) + receiver settle (~1ms) + RSSI valid. */
         vTaskDelay(pdMS_TO_TICKS(2));
 
-        int8_t rssi = -128;
-        sx126x_get_rssi_inst(ctx, &rssi);
+        /* sx126x_get_rssi_inst takes int16_t*, NOT int8_t*! */
+        int16_t rssi16 = -128;
+        sx126x_get_rssi_inst(ctx, &rssi16);
+        int8_t rssi = (rssi16 < -128) ? -128 : (rssi16 > 0) ? 0 : (int8_t)rssi16;
 
         out->rssi[i] = rssi;
         if (rssi > out->rssi_peak) {
@@ -128,8 +130,9 @@ esp_err_t nesso_subghz_capture(uint32_t freq_hz, uint32_t duration_ms,
         if ((now - start) > duration_ms) break;
         if (byte_idx >= SUBGHZ_CAPTURE_MAX_BYTES) break;
 
-        int8_t rssi = -128;
-        sx126x_get_rssi_inst(ctx, &rssi);
+        int16_t rssi16 = -128;
+        sx126x_get_rssi_inst(ctx, &rssi16);
+        int8_t rssi = (rssi16 < -128) ? -128 : (rssi16 > 0) ? 0 : (int8_t)rssi16;
 
         /* Threshold-based OOK decoding: above threshold = 1, below = 0. */
         bool bit = (rssi > rssi_threshold);
