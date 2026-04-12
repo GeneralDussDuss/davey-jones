@@ -70,6 +70,8 @@ typedef enum {
     UI_IR_MENU,
     UI_IR_TVBGONE,
     UI_IR_SAMSUNG_REMOTE,
+    UI_IR_VOLUME_MAX,
+    UI_IR_CHANNEL_CHAOS,
 } ui_state_t;
 
 static bool              s_up            = false;
@@ -293,10 +295,12 @@ static const menu_item_t s_main_items[] = {
 
 /* IR Menu */
 static const menu_item_t s_ir_items[] = {
-    { "> TV-B-Gone",      UI_IR_TVBGONE },
+    { "> TV-B-Gone",       UI_IR_TVBGONE },
     { "> Samsung Remote",  UI_IR_SAMSUNG_REMOTE },
+    { "> Volume MAX",      UI_IR_VOLUME_MAX },
+    { "> Channel Chaos",   UI_IR_CHANNEL_CHAOS },
 };
-#define IR_ITEM_COUNT 2
+#define IR_ITEM_COUNT 4
 
 static void build_main_menu(void)
 {
@@ -780,6 +784,31 @@ static void navigate(ui_state_t state)
         lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
         break;
     }
+    case UI_IR_VOLUME_MAX:
+    case UI_IR_CHANNEL_CHAOS:
+    {
+        const char *title = (state == UI_IR_VOLUME_MAX) ? "VOLUME MAX" : "CHANNEL CHAOS";
+        const char *desc  = (state == UI_IR_VOLUME_MAX)
+            ? "Spamming Vol+ to\nevery TV in range..."
+            : "Rapid channel surf\non every TV...";
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        s_dyn_count = 0;
+        lv_obj_t *t = lv_label_create(s_screen);
+        lv_label_set_text(t, title);
+        lv_obj_set_style_text_color(t, state == UI_IR_VOLUME_MAX ? COL_RED : COL_MAGENTA, 0);
+        lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 4);
+        lv_obj_t *msg = make_label(s_screen, 35, COL_YELLOW, desc);
+        (void)msg;
+        lv_obj_t *cnt = make_label(s_screen, 80, COL_CYAN, "0 sent");
+        track(cnt);
+        lv_obj_t *hint = lv_label_create(s_screen);
+        lv_label_set_text(hint, "KEY2:stop");
+        lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
     case UI_SUBGHZ_MENU:      build_placeholder("SUB-GHZ"); break;
     case UI_IR_MENU:          build_menu("Infrared", s_ir_items, IR_ITEM_COUNT); break;
     case UI_IR_TVBGONE:
@@ -978,6 +1007,31 @@ static void refresh_cb(lv_timer_t *t)
         nesso_led(s_tvbg_rounds % 2 == 0);
         break;
     }
+    case UI_IR_VOLUME_MAX:
+    case UI_IR_CHANNEL_CHAOS:
+    {
+        if (!nesso_ir_is_ready()) nesso_ir_init();
+        static uint32_t s_ir_spam_cnt = 0;
+        if (!s_tvbg_done) { s_tvbg_done = true; s_ir_spam_cnt = 0; }
+        if (s_state == UI_IR_VOLUME_MAX) {
+            nesso_ir_send_samsung(0x0707, 0x07);
+            nesso_ir_send_nec(0x04, 0x02);
+            nesso_ir_send_nec(0x01, 0x12);
+        } else {
+            if (s_ir_spam_cnt % 2 == 0) {
+                nesso_ir_send_samsung(0x0707, 0x12);
+                nesso_ir_send_nec(0x04, 0x00);
+            } else {
+                nesso_ir_send_samsung(0x0707, 0x10);
+                nesso_ir_send_nec(0x04, 0x01);
+            }
+        }
+        s_ir_spam_cnt++;
+        if (s_dyn_count >= 1)
+            lv_label_set_text_fmt(s_dyn_labels[0], "%lu sent", (unsigned long)s_ir_spam_cnt);
+        nesso_led(s_ir_spam_cnt % 2 == 0);
+        break;
+    }
     case UI_MAIN_MENU:
         /* Refresh stats line. */
         if (s_dyn_count > MAIN_ITEM_COUNT) {
@@ -1100,6 +1154,9 @@ static void button_task(void *arg)
                 navigate(UI_IR_MENU);
                 break;
             case UI_IR_SAMSUNG_REMOTE:
+            case UI_IR_VOLUME_MAX:
+            case UI_IR_CHANNEL_CHAOS:
+                nesso_led(false);
                 navigate(UI_IR_MENU);
                 break;
             default:
