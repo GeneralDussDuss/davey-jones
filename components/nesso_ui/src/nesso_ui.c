@@ -830,6 +830,7 @@ static void handle_select(void)
 
     case UI_MAIN_MENU:
     case UI_WIFI_MENU:
+    case UI_IR_MENU:
         if (items && s_cursor < count) {
             s_has_pending = true;
             s_pending_nav = items[s_cursor].target;
@@ -890,7 +891,6 @@ static void handle_select(void)
     }
 
     case UI_SUBGHZ_MENU:
-    case UI_IR_MENU:
         s_has_pending = true;
         s_pending_nav = UI_MAIN_MENU;
         break;
