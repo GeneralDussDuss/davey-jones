@@ -1,0 +1,12 @@
+menu "PI4IOE5V6408 I²C I/O Expander"
+
+    # Nothing to configure at build time right now.
+    # Runtime verbosity is controlled via esp_log_level_set("pi4ioe", ...).
+
+    config PI4IOE_PLACEHOLDER
+        bool
+        default y
+        help
+            Present so menuconfig renders the section header. Does nothing.
+
+endmenu

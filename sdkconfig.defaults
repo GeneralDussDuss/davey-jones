@@ -1,0 +1,67 @@
+# ==============================================================================
+# DAVEY JONES — default sdkconfig for ESP32-C6.
+#
+# Security posture is DEV mode. The "release hardening" workflow lives in
+# security_guidelines.md §17 — do NOT flip Secure Boot / Flash Encryption /
+# TEE / anti-rollback on here until a second board is in hand. See also the
+# "Two Boards Rule" in project_davey_jones.md memory.
+# ==============================================================================
+
+# --- Target ---------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32c6"
+
+# --- Free wins: memory protection + OTA rollback --------------------------
+# PMP-based memory protection — zero perf cost, real mitigation against
+# remote memory-corruption bugs in the WiFi / lwIP stacks.
+CONFIG_ESP_SYSTEM_MEMPROT_FEATURE=y
+
+# OTA rollback safety net (we won't use OTA yet, but enabling this now
+# costs nothing and keeps the option open).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# DPA side-channel protection — "low" is the default-on baseline with no
+# measurable perf impact.
+CONFIG_ESP_CRYPTO_DPA_PROTECTION_LEVEL_LOW=y
+
+# --- LEFT OFF intentionally — do not enable during dev --------------------
+# CONFIG_SECURE_BOOT                   # iteration killer
+# CONFIG_SECURE_FLASH_ENC_ENABLED      # first-encrypt brick risk on 250 mAh battery
+# CONFIG_SECURE_ENABLE_TEE             # SRAM + crypto HW tax
+# CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK  # we want downgrade capability
+# CONFIG_NVS_ENCRYPTION                # no sensitive NVS data yet
+
+# --- Flash + partitioning -------------------------------------------------
+# Nesso has 16 MB external SPI flash.
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# Custom partition table (see partitions.csv).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- Log level ------------------------------------------------------------
+# Verbose at bring-up. Drop to INFO once stable.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# --- Main task stack ------------------------------------------------------
+# 8 KB — LVGL + WiFi + LoRa callbacks will eventually push us. Start big.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- FreeRTOS -------------------------------------------------------------
+# Tick at 1 kHz for better button-polling granularity.
+CONFIG_FREERTOS_HZ=1000
+
+# --- USB Serial/JTAG ------------------------------------------------------
+# Native USB CDC for programming + monitor. Required on the Nesso since
+# it has no USB-UART bridge — it uses the ESP32-C6's built-in USB JTAG.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- LWIP / WiFi buffers (early defaults — will tune for WiFi work later)-
+CONFIG_LWIP_MAX_SOCKETS=10
+
+# --- SPI master -----------------------------------------------------------
+# Allow larger DMA transfers for LCD frame pushes.
+CONFIG_SPI_MASTER_ISR_IN_IRAM=y

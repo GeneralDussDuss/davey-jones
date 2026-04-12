@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "src/nesso_sx1262.c"
+        "src/nesso_sx1262_hal.c"
+        "vendor/sx126x.c"
+        "vendor/sx126x_driver_version.c"
+    INCLUDE_DIRS
+        "include"
+        "vendor"
+    PRIV_INCLUDE_DIRS
+        "src"
+    REQUIRES
+        nesso_bsp
+        nesso_spi
+        driver
+    PRIV_REQUIRES
+        esp_common
+        freertos
+        log
+        esp_rom
+)

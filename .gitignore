@@ -1,0 +1,11 @@
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+__pycache__/
+*.pyc
+monitor.log
+monitor_err.log
+build_output.log
+*.bin
