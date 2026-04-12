@@ -99,6 +99,9 @@ static lv_obj_t *s_lora_scr = NULL;
 static lv_timer_t   *s_refresh_timer = NULL;
 static TaskHandle_t  s_button_task   = NULL;
 
+/* Deferred view switch — set from touch callbacks, applied on next refresh. */
+static nesso_ui_view_t s_pending_view = NESSO_UI_VIEW_COUNT;
+
 /* Touch */
 static esp_lcd_touch_handle_t s_touch = NULL;
 static lv_indev_t            *s_touch_indev = NULL;
@@ -156,13 +159,14 @@ static void aps_screen_tapped(lv_event_t *e)
     (void)e;
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (s_last_tap_ms && (now - s_last_tap_ms) < DOUBLE_TAP_MS) {
-        /* Double tap — start deauth + switch to attack view. */
+        /* Double tap — start deauth + defer switch to attack view.
+         * Can't call lv_scr_load directly from an LVGL event callback
+         * reliably — defer to the next refresh tick. */
         if (s_deauth_active) {
             stop_deauth();
-            /* Stay on APS view after stopping. */
         } else if (s_ap_snap_count > 0) {
             start_deauth(s_aps_cursor);
-            show_view_locked(NESSO_UI_VIEW_ATTACK);
+            s_pending_view = NESSO_UI_VIEW_ATTACK;
         }
         s_last_tap_ms = 0;
     } else {
@@ -476,6 +480,13 @@ static void stop_deauth(void)
 static void refresh_cb(lv_timer_t *t)
 {
     (void)t;
+
+    /* Apply any deferred view switch from touch callbacks. */
+    if (s_pending_view < NESSO_UI_VIEW_COUNT) {
+        nesso_ui_view_t v = s_pending_view;
+        s_pending_view = NESSO_UI_VIEW_COUNT;
+        show_view_locked(v);
+    }
 
     if (s_view == NESSO_UI_VIEW_DASH) {
         nesso_wardrive_status_t ws = {0};
