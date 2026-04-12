@@ -25,7 +25,8 @@ extern "C" {
 
 typedef enum {
     NESSO_UI_VIEW_DASH = 0,    /* live counters */
-    NESSO_UI_VIEW_APS,         /* top-RSSI AP list (placeholder) */
+    NESSO_UI_VIEW_APS,         /* AP list + target selection */
+    NESSO_UI_VIEW_ATTACK,      /* deauth details screen */
     NESSO_UI_VIEW_LORA,        /* LoRa radio state (placeholder) */
     NESSO_UI_VIEW_COUNT,
 } nesso_ui_view_t;

@@ -81,6 +81,18 @@ static char     s_deauth_ssid[33] = {0};
 static uint32_t s_deauth_sent     = 0;
 static lv_timer_t *s_deauth_timer = NULL;
 
+/* Attack detail view */
+static lv_obj_t *s_atk_scr          = NULL;
+static lv_obj_t *s_atk_title        = NULL;
+static lv_obj_t *s_atk_ssid         = NULL;
+static lv_obj_t *s_atk_bssid        = NULL;
+static lv_obj_t *s_atk_info         = NULL;
+static lv_obj_t *s_atk_frames       = NULL;
+static lv_obj_t *s_atk_pmkid        = NULL;
+static lv_obj_t *s_atk_time         = NULL;
+static lv_obj_t *s_atk_hint         = NULL;
+static uint32_t  s_atk_start_ms     = 0;
+
 /* LORA view */
 static lv_obj_t *s_lora_scr = NULL;
 
@@ -279,6 +291,97 @@ static void refresh_aps_view(void)
     }
 }
 
+/* -------------------- ATTACK detail view -------------------- */
+
+static void build_attack_screen(void)
+{
+    s_atk_scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_atk_scr, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa  (s_atk_scr, LV_OPA_COVER, 0);
+
+    s_atk_title = lv_label_create(s_atk_scr);
+    lv_label_set_text(s_atk_title, "DEAUTH");
+    lv_obj_set_style_text_color(s_atk_title, COL_RED, 0);
+    lv_obj_align(s_atk_title, LV_ALIGN_TOP_MID, 0, 4);
+
+    int y = 28;
+    /* Target info */
+    lv_obj_t *tgt = make_row_label(s_atk_scr, y, COL_WHITE, "TARGET"); y += 18;
+    (void)tgt;
+
+    s_atk_ssid = make_row_label(s_atk_scr, y, COL_YELLOW, "---"); y += 18;
+    s_atk_bssid = make_row_label(s_atk_scr, y, COL_CYAN, "---"); y += 18;
+    s_atk_info = make_row_label(s_atk_scr, y, COL_CYAN, "---"); y += 24;
+
+    /* Attack stats */
+    lv_obj_t *atk = make_row_label(s_atk_scr, y, COL_WHITE, "ATTACK"); y += 18;
+    (void)atk;
+
+    s_atk_frames = make_row_label(s_atk_scr, y, COL_RED, "Frames: 0"); y += 18;
+    s_atk_pmkid = make_row_label(s_atk_scr, y, COL_YELLOW, "PMKIDs: 0"); y += 18;
+    s_atk_time = make_row_label(s_atk_scr, y, COL_CYAN, "Time: 0:00"); y += 22;
+
+    s_atk_hint = lv_label_create(s_atk_scr);
+    lv_label_set_text(s_atk_hint, "KEY1:stop  KEY2:back");
+    lv_obj_set_style_text_color(s_atk_hint, COL_WHITE, 0);
+    lv_obj_align(s_atk_hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
+static void update_attack_screen(void)
+{
+    if (!s_deauth_active) {
+        lv_label_set_text(s_atk_title, "DEAUTH STOPPED");
+        lv_obj_set_style_text_color(s_atk_title, COL_WHITE, 0);
+        lv_label_set_text(s_atk_hint, "KEY2:back to targets");
+        return;
+    }
+
+    /* Blink title */
+    static bool blink = false;
+    blink = !blink;
+    lv_label_set_text(s_atk_title, blink ? ">> DEAUTH <<" : "   DEAUTH   ");
+    lv_obj_set_style_text_color(s_atk_title, blink ? COL_RED : COL_MAGENTA, 0);
+
+    /* Target details */
+    if (s_deauth_ssid[0]) {
+        lv_label_set_text(s_atk_ssid, s_deauth_ssid);
+    } else {
+        char mac[20];
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 s_deauth_bssid[0], s_deauth_bssid[1], s_deauth_bssid[2],
+                 s_deauth_bssid[3], s_deauth_bssid[4], s_deauth_bssid[5]);
+        lv_label_set_text(s_atk_ssid, mac);
+    }
+
+    char bssid_str[20];
+    snprintf(bssid_str, sizeof(bssid_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             s_deauth_bssid[0], s_deauth_bssid[1], s_deauth_bssid[2],
+             s_deauth_bssid[3], s_deauth_bssid[4], s_deauth_bssid[5]);
+    lv_label_set_text(s_atk_bssid, bssid_str);
+
+    char info[24];
+    snprintf(info, sizeof(info), "ch%u  %ddBm",
+             s_deauth_channel, (int)s_ap_snap[s_aps_cursor].rssi_peak);
+    lv_label_set_text(s_atk_info, info);
+
+    /* Counters */
+    lv_label_set_text_fmt(s_atk_frames, "Frames: %lu",
+                          (unsigned long)s_deauth_sent);
+
+    nesso_eapol_status_t es = {0};
+    nesso_eapol_status(&es);
+    lv_label_set_text_fmt(s_atk_pmkid, "PMKIDs: %lu",
+                          (unsigned long)es.pmkids_captured);
+
+    /* Timer */
+    uint32_t elapsed_s = (uint32_t)((esp_timer_get_time() / 1000000ULL)) -
+                         (s_atk_start_ms / 1000);
+    uint32_t mins = elapsed_s / 60;
+    uint32_t secs = elapsed_s % 60;
+    lv_label_set_text_fmt(s_atk_time, "Time: %lu:%02lu",
+                          (unsigned long)mins, (unsigned long)secs);
+}
+
 /* -------------------- LORA view -------------------- */
 
 static void build_lora_screen(void)
@@ -340,6 +443,7 @@ static void start_deauth(int ap_index)
      * LVGL task so we don't need a separate FreeRTOS task). */
     s_deauth_timer = lv_timer_create(deauth_timer_cb, 2000, NULL);
     s_deauth_active = true;
+    s_atk_start_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
     ESP_LOGI(TAG, "DEAUTH started: %s ch=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x",
              s_deauth_ssid, s_deauth_channel,
@@ -405,6 +509,10 @@ static void refresh_cb(lv_timer_t *t)
     if (s_view == NESSO_UI_VIEW_APS) {
         refresh_aps_view();
     }
+
+    if (s_view == NESSO_UI_VIEW_ATTACK) {
+        update_attack_screen();
+    }
 }
 
 /* -------------------- view switching -------------------- */
@@ -412,9 +520,10 @@ static void refresh_cb(lv_timer_t *t)
 static lv_obj_t *screen_for(nesso_ui_view_t v)
 {
     switch (v) {
-    case NESSO_UI_VIEW_DASH: return s_dash_scr;
-    case NESSO_UI_VIEW_APS:  return s_aps_scr;
-    case NESSO_UI_VIEW_LORA: return s_lora_scr;
+    case NESSO_UI_VIEW_DASH:   return s_dash_scr;
+    case NESSO_UI_VIEW_APS:    return s_aps_scr;
+    case NESSO_UI_VIEW_ATTACK: return s_atk_scr;
+    case NESSO_UI_VIEW_LORA:   return s_lora_scr;
     default: return s_dash_scr;
     }
 }
@@ -476,13 +585,13 @@ static void button_task(void *arg)
             continue;
         }
 
-        /* Long-press KEY2 on APS = start/stop deauth. */
+        /* Long-press KEY2 on APS = start deauth + go to attack view. */
         if (evt.key == NESSO_KEY2 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
             if (s_view == NESSO_UI_VIEW_APS && s_ap_snap_count > 0) {
                 lvgl_port_lock(0);
-                if (s_deauth_active) stop_deauth();
-                else start_deauth(s_aps_cursor);
+                if (!s_deauth_active) start_deauth(s_aps_cursor);
                 lvgl_port_unlock();
+                nesso_ui_show(NESSO_UI_VIEW_ATTACK);
             }
             continue;
         }
@@ -496,13 +605,25 @@ static void button_task(void *arg)
                 (s_ap_snap_count > 0 ? (int)s_ap_snap_count : 1);
             refresh_aps_view();
             lvgl_port_unlock();
+        } else if (s_view == NESSO_UI_VIEW_ATTACK) {
+            /* Attack view: KEY1 = stop + back, KEY2 = back (keep running) */
+            if (evt.key == NESSO_KEY1) {
+                lvgl_port_lock(0);
+                if (s_deauth_active) stop_deauth();
+                lvgl_port_unlock();
+                nesso_ui_show(NESSO_UI_VIEW_APS);
+            } else if (evt.key == NESSO_KEY2) {
+                nesso_ui_show(NESSO_UI_VIEW_APS);
+            }
         } else if (evt.key == NESSO_KEY2) {
-            /* KEY2 short = next view from any screen. */
+            /* KEY2 short = next view (skip attack view in normal cycling). */
             nesso_ui_view_t next = (nesso_ui_view_t)((s_view + 1) % NESSO_UI_VIEW_COUNT);
+            if (next == NESSO_UI_VIEW_ATTACK) next = (nesso_ui_view_t)((next + 1) % NESSO_UI_VIEW_COUNT);
             nesso_ui_show(next);
         } else if (evt.key == NESSO_KEY1) {
-            /* KEY1 short on DASH/LORA = cycle views too. */
+            /* KEY1 short on DASH/LORA = cycle views. */
             nesso_ui_view_t next = (nesso_ui_view_t)((s_view + 1) % NESSO_UI_VIEW_COUNT);
+            if (next == NESSO_UI_VIEW_ATTACK) next = (nesso_ui_view_t)((next + 1) % NESSO_UI_VIEW_COUNT);
             nesso_ui_show(next);
         }
     }
@@ -576,6 +697,7 @@ esp_err_t nesso_ui_init(void)
     lvgl_port_lock(0);
     build_dash_screen();
     build_aps_screen();
+    build_attack_screen();
     build_lora_screen();
     show_view_locked(NESSO_UI_VIEW_DASH);
     s_refresh_timer = lv_timer_create(refresh_cb, 250, NULL);
