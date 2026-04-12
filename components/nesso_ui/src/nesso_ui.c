@@ -847,26 +847,22 @@ static void navigate(ui_state_t state)
         lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
         s_dyn_count = 0;
 
-        /* Landscape: 240 wide x 135 tall. */
-        lv_obj_t *t = make_label(s_screen, 2, COL_GREEN, "SPECTRUM ANALYZER");
-        (void)t;
-
-        /* Band info label. */
-        lv_obj_t *band_lbl = make_label(s_screen, 16, COL_CYAN, "433 MHz band");
+        /* Landscape: 240 wide x 135 tall.
+         * Layout: band info (top) → canvas (middle) → peak info (bottom) */
+        lv_obj_t *band_lbl = make_label(s_screen, 2, COL_GREEN, "433 MHz  2xtap:band");
         track(band_lbl); /* 0: band info */
 
-        /* Peak info. */
-        lv_obj_t *peak_lbl = make_label(s_screen, 120, COL_YELLOW, "Peak: --- MHz  --- dBm");
-        track(peak_lbl); /* 1: peak info */
-
-        /* Canvas for the waveform — draw directly in refresh. */
-        /* We'll use LVGL's lv_canvas for pixel-level drawing. */
-        static lv_color_t cbuf[240 * 90];
+        /* Canvas for waveform — 240 wide x 100 tall, below the band label. */
+        static lv_color_t cbuf[240 * 100];
         lv_obj_t *canvas = lv_canvas_create(s_screen);
-        lv_canvas_set_buffer(canvas, cbuf, 240, 90, LV_COLOR_FORMAT_RGB565);
-        lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 0, 28);
+        lv_canvas_set_buffer(canvas, cbuf, 240, 100, LV_COLOR_FORMAT_RGB565);
+        lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 0, 18);
         lv_canvas_fill_bg(canvas, COL_BLACK, LV_OPA_COVER);
-        track(canvas); /* 2: canvas */
+        track(canvas); /* 1: canvas */
+
+        /* Peak info at bottom. */
+        lv_obj_t *peak_lbl = make_label(s_screen, 120, COL_YELLOW, "Peak: ---");
+        track(peak_lbl); /* 2: peak info */
 
         nesso_buzzer_init();
         break;
@@ -1126,20 +1122,21 @@ static void refresh_cb(lv_timer_t *t)
 
         static const char *band_names[] = { "433 MHz", "868 MHz", "915 MHz" };
         lv_label_set_text_fmt(s_dyn_labels[0], "%s  2xtap:band", band_names[s_subghz_band]);
-        lv_label_set_text_fmt(s_dyn_labels[1], "Peak: %lu.%02lu MHz %ddBm",
+
+        lv_label_set_text_fmt(s_dyn_labels[2], "Peak: %lu.%02lu MHz %ddBm",
                               (unsigned long)(s_spectrum.peak_freq_hz / 1000000),
                               (unsigned long)((s_spectrum.peak_freq_hz % 1000000) / 10000),
                               s_spectrum.rssi_peak);
 
-        /* Draw waveform on canvas (240 x 90). */
-        lv_obj_t *canvas = s_dyn_labels[2];
+        /* Draw waveform on canvas (240 x 100). */
+        lv_obj_t *canvas = s_dyn_labels[1];
         lv_canvas_fill_bg(canvas, COL_BLACK, LV_OPA_COVER);
 
         for (int x = 0; x < SUBGHZ_SPECTRUM_POINTS && x < 240; ++x) {
             int rssi = s_spectrum.rssi[x];
-            int height = (rssi + 128) * 89 / 128;
+            int height = (rssi + 128) * 99 / 128;
             if (height < 0) height = 0;
-            if (height > 89) height = 89;
+            if (height > 99) height = 99;
 
             lv_color_t color;
             if (rssi > -60) color = COL_RED;
@@ -1147,14 +1144,21 @@ static void refresh_cb(lv_timer_t *t)
             else if (rssi > -100) color = COL_GREEN;
             else color = COL_CYAN;
 
-            for (int y = 89; y >= 89 - height; --y) {
+            for (int y = 99; y >= 99 - height; --y) {
                 lv_canvas_set_px(canvas, x, y, color, LV_OPA_COVER);
             }
         }
 
-        if (s_spectrum.rssi_peak > -90) {
-            uint32_t pitch = (uint32_t)(2000 + (s_spectrum.rssi_peak + 90) * 50);
-            nesso_buzzer_tone(pitch, 0);
+        /* Flipper-style audio: continuous tone whose pitch tracks the
+         * peak signal strength. Silence when nothing above noise floor.
+         * Chirps rapidly when signal is strong. */
+        if (s_spectrum.rssi_peak > -100) {
+            /* Map -100..-30 dBm to 500..4000 Hz. */
+            int strength = s_spectrum.rssi_peak + 100;  /* 0..70 */
+            if (strength < 0) strength = 0;
+            if (strength > 70) strength = 70;
+            uint32_t pitch = 500 + (uint32_t)strength * 50;
+            nesso_buzzer_tone(pitch, 0);  /* continuous — updated each sweep */
         } else {
             nesso_buzzer_off();
         }

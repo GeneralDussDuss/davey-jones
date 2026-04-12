@@ -61,8 +61,8 @@ esp_err_t nesso_subghz_sweep(subghz_band_t band, subghz_spectrum_t *out)
         uint32_t freq = out->freq_start_hz + (uint32_t)i * step;
         sx126x_set_rf_freq(ctx, freq);
 
-        /* Brief settle time for PLL. */
-        esp_rom_delay_us(200);
+        /* PLL settle time — SX1262 needs ~500µs to lock on new freq. */
+        esp_rom_delay_us(500);
 
         /* Read instantaneous RSSI. */
         int8_t rssi = -128;
