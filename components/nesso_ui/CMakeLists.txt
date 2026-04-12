@@ -9,6 +9,8 @@ idf_component_register(
         nesso_eapol
         nesso_wifi
         nesso_ir
+        nesso_subghz
+        nesso_buzzer
         esp_lcd
         esp_driver_i2c
     PRIV_REQUIRES

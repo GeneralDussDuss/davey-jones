@@ -191,6 +191,9 @@ typedef enum {
 /** FreeRTOS queue the user can xQueueReceive(nesso_sx1262_event_t) from. */
 QueueHandle_t nesso_sx1262_event_queue(void);
 
+/** Raw HAL context for direct sx126x driver access (used by nesso_subghz). */
+const void *nesso_sx1262_get_hal_ctx(void);
+
 /** Helper for continuous-RX mode: reads latched RX metadata + buffer. */
 esp_err_t nesso_sx1262_read_last_rx(uint8_t *out_buf, size_t out_buf_size,
                                     nesso_sx1262_rx_info_t *out_info);

@@ -41,6 +41,8 @@
 #include "nesso_eapol.h"
 #include "nesso_wifi.h"
 #include "nesso_ir.h"
+#include "nesso_subghz.h"
+#include "nesso_buzzer.h"
 
 static const char *TAG = "nesso_ui";
 
@@ -67,6 +69,9 @@ typedef enum {
     UI_WIFI_BEACON_SPAM,
     UI_WIFI_DAVEYGOTCHI,
     UI_SUBGHZ_MENU,
+    UI_SUBGHZ_ANALYZER,
+    UI_SUBGHZ_CAPTURE,
+    UI_SUBGHZ_REPLAY,
     UI_IR_MENU,
     UI_IR_TVBGONE,
     UI_IR_SAMSUNG_REMOTE,
@@ -292,6 +297,20 @@ static const menu_item_t s_main_items[] = {
     { "> IR",      UI_IR_MENU },
 };
 #define MAIN_ITEM_COUNT 3
+
+/* Sub-GHz Menu */
+static const menu_item_t s_subghz_items[] = {
+    { "> Analyzer",  UI_SUBGHZ_ANALYZER },
+    { "> Capture",   UI_SUBGHZ_CAPTURE },
+    { "> Replay",    UI_SUBGHZ_REPLAY },
+};
+#define SUBGHZ_ITEM_COUNT 3
+
+/* Sub-GHz state */
+static subghz_band_t     s_subghz_band = SUBGHZ_BAND_433;
+static subghz_spectrum_t s_spectrum = {0};
+static subghz_capture_t  s_capture  = {0};
+static bool              s_has_capture = false;
 
 /* IR Menu */
 static const menu_item_t s_ir_items[] = {
@@ -737,6 +756,12 @@ static void build_scanning(void)
 static void navigate(ui_state_t state)
 {
     s_tvbg_done = false;
+
+    /* Reset landscape rotation if leaving analyzer. */
+    if (s_state == UI_SUBGHZ_ANALYZER && state != UI_SUBGHZ_ANALYZER) {
+        lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_0);
+    }
+
     s_state = state;
     s_dyn_count = 0;
 
@@ -809,7 +834,86 @@ static void navigate(ui_state_t state)
         lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
         break;
     }
-    case UI_SUBGHZ_MENU:      build_placeholder("SUB-GHZ"); break;
+    case UI_SUBGHZ_MENU:
+        build_menu("Sub-GHz", s_subghz_items, SUBGHZ_ITEM_COUNT);
+        break;
+    case UI_SUBGHZ_ANALYZER:
+    {
+        /* Switch to landscape for wider waveform. */
+        lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_90);
+
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        s_dyn_count = 0;
+
+        /* Landscape: 240 wide x 135 tall. */
+        lv_obj_t *t = make_label(s_screen, 2, COL_GREEN, "SPECTRUM ANALYZER");
+        (void)t;
+
+        /* Band info label. */
+        lv_obj_t *band_lbl = make_label(s_screen, 16, COL_CYAN, "433 MHz band");
+        track(band_lbl); /* 0: band info */
+
+        /* Peak info. */
+        lv_obj_t *peak_lbl = make_label(s_screen, 120, COL_YELLOW, "Peak: --- MHz  --- dBm");
+        track(peak_lbl); /* 1: peak info */
+
+        /* Canvas for the waveform — draw directly in refresh. */
+        /* We'll use LVGL's lv_canvas for pixel-level drawing. */
+        static lv_color_t cbuf[240 * 90];
+        lv_obj_t *canvas = lv_canvas_create(s_screen);
+        lv_canvas_set_buffer(canvas, cbuf, 240, 90, LV_COLOR_FORMAT_RGB565);
+        lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 0, 28);
+        lv_canvas_fill_bg(canvas, COL_BLACK, LV_OPA_COVER);
+        track(canvas); /* 2: canvas */
+
+        nesso_buzzer_init();
+        break;
+    }
+    case UI_SUBGHZ_CAPTURE:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        s_dyn_count = 0;
+
+        make_label(s_screen, 4, COL_MAGENTA, "CAPTURE");
+        lv_obj_t *st = make_label(s_screen, 30, COL_YELLOW, "Listening at 433.92 MHz...");
+        track(st); /* 0 */
+        lv_obj_t *cnt = make_label(s_screen, 55, COL_CYAN, "0 bytes");
+        track(cnt); /* 1 */
+        lv_obj_t *hint = lv_label_create(s_screen);
+        lv_label_set_text(hint, "KEY2:stop + save");
+        lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
+    case UI_SUBGHZ_REPLAY:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        s_dyn_count = 0;
+
+        make_label(s_screen, 4, COL_MAGENTA, "REPLAY");
+        if (s_has_capture) {
+            char info[40];
+            snprintf(info, sizeof(info), "%lu Hz, %zu bytes",
+                     (unsigned long)s_capture.freq_hz, s_capture.length);
+            make_label(s_screen, 30, COL_CYAN, info);
+            lv_obj_t *st = make_label(s_screen, 55, COL_YELLOW, "2xtap to transmit");
+            track(st); /* 0 */
+        } else {
+            make_label(s_screen, 30, COL_RED, "No capture loaded");
+            make_label(s_screen, 55, COL_WHITE, "Capture a signal first");
+        }
+        lv_obj_t *hint = lv_label_create(s_screen);
+        lv_label_set_text(hint, "KEY2:back");
+        lv_obj_set_style_text_color(hint, COL_WHITE, 0);
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
     case UI_IR_MENU:          build_menu("Infrared", s_ir_items, IR_ITEM_COUNT); break;
     case UI_IR_TVBGONE:
     {
@@ -860,6 +964,7 @@ static void handle_select(void)
     case UI_MAIN_MENU:
     case UI_WIFI_MENU:
     case UI_IR_MENU:
+    case UI_SUBGHZ_MENU:
         if (items && s_cursor < count) {
             s_has_pending = true;
             s_pending_nav = items[s_cursor].target;
@@ -919,9 +1024,15 @@ static void handle_select(void)
         break;
     }
 
-    case UI_SUBGHZ_MENU:
-        s_has_pending = true;
-        s_pending_nav = UI_MAIN_MENU;
+    case UI_SUBGHZ_REPLAY:
+        if (s_has_capture) {
+            nesso_subghz_replay(&s_capture);
+        }
+        break;
+
+    case UI_SUBGHZ_ANALYZER:
+        /* Double-tap cycles bands. */
+        s_subghz_band = (subghz_band_t)((s_subghz_band + 1) % 3);
         break;
 
     default:
@@ -937,7 +1048,8 @@ static const menu_item_t *current_menu_items(int *out_count)
     switch (s_state) {
     case UI_MAIN_MENU: *out_count = MAIN_ITEM_COUNT; return s_main_items;
     case UI_WIFI_MENU: *out_count = WIFI_ITEM_COUNT; return s_wifi_items;
-    case UI_IR_MENU:   *out_count = IR_ITEM_COUNT;   return s_ir_items;
+    case UI_IR_MENU:     *out_count = IR_ITEM_COUNT;     return s_ir_items;
+    case UI_SUBGHZ_MENU: *out_count = SUBGHZ_ITEM_COUNT; return s_subghz_items;
     default: *out_count = 0; return NULL;
     }
 }
@@ -1005,6 +1117,71 @@ static void refresh_cb(lv_timer_t *t)
                                         blink ? COL_RED : COL_YELLOW, 0);
         }
         nesso_led(s_tvbg_rounds % 2 == 0);
+        break;
+    }
+    case UI_SUBGHZ_ANALYZER:
+    {
+        if (s_dyn_count < 3) break;
+        nesso_subghz_sweep(s_subghz_band, &s_spectrum);
+
+        static const char *band_names[] = { "433 MHz", "868 MHz", "915 MHz" };
+        lv_label_set_text_fmt(s_dyn_labels[0], "%s  2xtap:band", band_names[s_subghz_band]);
+        lv_label_set_text_fmt(s_dyn_labels[1], "Peak: %lu.%02lu MHz %ddBm",
+                              (unsigned long)(s_spectrum.peak_freq_hz / 1000000),
+                              (unsigned long)((s_spectrum.peak_freq_hz % 1000000) / 10000),
+                              s_spectrum.rssi_peak);
+
+        /* Draw waveform on canvas (240 x 90). */
+        lv_obj_t *canvas = s_dyn_labels[2];
+        lv_canvas_fill_bg(canvas, COL_BLACK, LV_OPA_COVER);
+
+        for (int x = 0; x < SUBGHZ_SPECTRUM_POINTS && x < 240; ++x) {
+            int rssi = s_spectrum.rssi[x];
+            int height = (rssi + 128) * 89 / 128;
+            if (height < 0) height = 0;
+            if (height > 89) height = 89;
+
+            lv_color_t color;
+            if (rssi > -60) color = COL_RED;
+            else if (rssi > -80) color = COL_YELLOW;
+            else if (rssi > -100) color = COL_GREEN;
+            else color = COL_CYAN;
+
+            for (int y = 89; y >= 89 - height; --y) {
+                lv_canvas_set_px(canvas, x, y, color, LV_OPA_COVER);
+            }
+        }
+
+        if (s_spectrum.rssi_peak > -90) {
+            uint32_t pitch = (uint32_t)(2000 + (s_spectrum.rssi_peak + 90) * 50);
+            nesso_buzzer_tone(pitch, 0);
+        } else {
+            nesso_buzzer_off();
+        }
+        break;
+    }
+    case UI_SUBGHZ_CAPTURE:
+    {
+        static bool s_cap_done = false;
+        if (!s_cap_done) {
+            s_cap_done = true;
+            esp_err_t err = nesso_subghz_capture(433920000, 5000, -70, &s_capture);
+            if (err == ESP_OK) {
+                s_has_capture = true;
+                if (s_dyn_count >= 2) {
+                    lv_label_set_text(s_dyn_labels[0], "Signal captured!");
+                    lv_label_set_text_fmt(s_dyn_labels[1], "%zu bytes", s_capture.length);
+                    lv_obj_set_style_text_color(s_dyn_labels[0], COL_GREEN, 0);
+                }
+                nesso_subghz_save(&s_capture, "/storage/capture.bin");
+                nesso_buzzer_tone(3000, 200);
+            } else {
+                if (s_dyn_count >= 2) {
+                    lv_label_set_text(s_dyn_labels[0], "No signal detected");
+                    lv_obj_set_style_text_color(s_dyn_labels[0], COL_RED, 0);
+                }
+            }
+        }
         break;
     }
     case UI_IR_VOLUME_MAX:
@@ -1094,6 +1271,7 @@ static void button_task(void *arg)
             case UI_MAIN_MENU:
             case UI_WIFI_MENU:
             case UI_IR_MENU:
+            case UI_SUBGHZ_MENU:
             {
                 int count = 0;
                 current_menu_items(&count);
@@ -1146,6 +1324,14 @@ static void button_task(void *arg)
                 break;
             case UI_SUBGHZ_MENU:
                 navigate(UI_MAIN_MENU);
+                break;
+            case UI_SUBGHZ_ANALYZER:
+                nesso_buzzer_off();
+                navigate(UI_SUBGHZ_MENU);
+                break;
+            case UI_SUBGHZ_CAPTURE:
+            case UI_SUBGHZ_REPLAY:
+                navigate(UI_SUBGHZ_MENU);
                 break;
             case UI_IR_MENU:
                 navigate(UI_MAIN_MENU);

@@ -559,6 +559,8 @@ esp_err_t nesso_sx1262_standby(void)
 
 QueueHandle_t nesso_sx1262_event_queue(void) { return s_events; }
 
+const void *nesso_sx1262_get_hal_ctx(void) { return s_ready ? &s_hal_ctx : NULL; }
+
 esp_err_t nesso_sx1262_read_last_rx(uint8_t *out_buf, size_t out_buf_size,
                                     nesso_sx1262_rx_info_t *out_info)
 {
