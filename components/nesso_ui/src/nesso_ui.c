@@ -241,6 +241,8 @@ static void screen_tapped(lv_event_t *e)
 
 static void navigate(ui_state_t state);
 
+#include "splash_img.h"
+
 /* Splash */
 static void build_splash(void)
 {
@@ -248,18 +250,23 @@ static void build_splash(void)
     lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
     lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
 
+    /* Kraken image — 135×200 RGB565, fills most of the screen. */
+    lv_obj_t *canvas = lv_canvas_create(s_screen);
+    lv_canvas_set_buffer(canvas, (void *)splash_data, SPLASH_W, SPLASH_H,
+                         LV_COLOR_FORMAT_RGB565);
+    lv_obj_align(canvas, LV_ALIGN_TOP_MID, 0, 0);
+
+    /* Title overlaid on the image. */
     lv_obj_t *title = lv_label_create(s_screen);
-    lv_label_set_text(title, "DAVEY\nJONES");
+    lv_label_set_text(title, "DAVEY JONES");
     lv_obj_set_style_text_color(title, COL_MAGENTA, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 205);
 
     lv_obj_t *sub = lv_label_create(s_screen);
-    lv_label_set_text(sub, "tap to start");
+    lv_label_set_text(sub, "v0.1 // tap to start");
     lv_obj_set_style_text_color(sub, COL_CYAN, 0);
-    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 30);
-
-    /* Universal tap handler added by navigate(). */
+    lv_obj_align(sub, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
 /* Menu item builder helper (typedef is above, near forward declarations). */
