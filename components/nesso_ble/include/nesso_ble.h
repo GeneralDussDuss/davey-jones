@@ -54,6 +54,54 @@ bool nesso_ble_spam_is_active(void);
 /** Number of advertisements sent since spam started. */
 uint32_t nesso_ble_spam_sent(void);
 
+/* -------------------- tracker detector -------------------- */
+
+typedef struct {
+    uint8_t  addr[6];
+    char     type[12];   /* "AirTag", "SmartTag", "Tile", etc. */
+    int8_t   rssi;
+    uint32_t first_seen; /* ms since boot */
+    uint32_t last_seen;
+} nesso_ble_tracker_t;
+
+#define BLE_TRACKER_MAX 16
+
+typedef struct {
+    nesso_ble_tracker_t trackers[BLE_TRACKER_MAX];
+    size_t count;
+} nesso_ble_tracker_result_t;
+
+/**
+ * Start continuous tracker detection. Callback fires when new tracker found.
+ * Pass NULL callback for silent detection (poll with nesso_ble_tracker_get).
+ */
+typedef void (*nesso_ble_tracker_cb_t)(const nesso_ble_tracker_t *tracker, void *user);
+esp_err_t nesso_ble_tracker_start(nesso_ble_tracker_cb_t cb, void *user);
+esp_err_t nesso_ble_tracker_stop(void);
+esp_err_t nesso_ble_tracker_get(nesso_ble_tracker_result_t *out);
+bool nesso_ble_tracker_is_active(void);
+
+/* -------------------- device cloner -------------------- */
+
+/** Clone a scanned device's advertisement. Start rebroadcasting its data. */
+esp_err_t nesso_ble_clone_start(const nesso_ble_device_t *target);
+esp_err_t nesso_ble_clone_stop(void);
+bool nesso_ble_clone_is_active(void);
+
+/* -------------------- sniffer / logger -------------------- */
+
+/** Start logging all BLE advertisements to a CSV file on SPIFFS. */
+esp_err_t nesso_ble_sniff_start(const char *csv_path);
+esp_err_t nesso_ble_sniff_stop(void);
+bool nesso_ble_sniff_is_active(void);
+uint32_t nesso_ble_sniff_count(void);
+
+/* -------------------- beacon broadcaster -------------------- */
+
+/** Broadcast an iBeacon with the given UUID + major + minor. */
+esp_err_t nesso_ble_beacon_start(const uint8_t uuid[16], uint16_t major, uint16_t minor);
+esp_err_t nesso_ble_beacon_stop(void);
+
 #ifdef __cplusplus
 }
 #endif

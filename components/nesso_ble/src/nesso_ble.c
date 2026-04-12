@@ -412,3 +412,302 @@ esp_err_t nesso_ble_spam_stop(void)
 }
 
 bool nesso_ble_spam_is_active(void) { return s_spam_running; }
+
+/* ==================== TRACKER DETECTOR ==================== */
+
+static bool s_tracker_running = false;
+static nesso_ble_tracker_result_t s_trackers = {0};
+static nesso_ble_tracker_cb_t s_tracker_cb = NULL;
+static void *s_tracker_cb_user = NULL;
+
+static bool is_tracker_adv(const uint8_t *data, uint8_t len, char *type_out)
+{
+    /* Apple Find My / AirTag: manufacturer 0x4C00 with type 0x12. */
+    for (int i = 0; i + 5 < len; ++i) {
+        if (data[i] == 0xFF && i >= 1) {
+            if (data[i+1] == 0x4C && data[i+2] == 0x00 && data[i+3] == 0x12) {
+                strcpy(type_out, "AirTag");
+                return true;
+            }
+            /* Samsung SmartTag: manufacturer 0x0075. */
+            if (data[i+1] == 0x75 && data[i+2] == 0x00) {
+                /* Check for SmartTag-specific bytes. */
+                strcpy(type_out, "SmartTag");
+                return true;
+            }
+        }
+    }
+    /* Tile: service UUID 0xFEED or 0xFD84. */
+    for (int i = 0; i + 4 < len; ++i) {
+        if (data[i] == 0x03 && data[i+1] == 0x03) {
+            uint16_t uuid = data[i+2] | (data[i+3] << 8);
+            if (uuid == 0xFEED || uuid == 0xFD84) {
+                strcpy(type_out, "Tile");
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static int tracker_event_cb(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    if (event->type != BLE_GAP_EVENT_DISC) return 0;
+
+    const struct ble_gap_disc_desc *desc = &event->disc;
+    char type[12] = "";
+
+    if (!is_tracker_adv(desc->data, desc->length_data, type)) return 0;
+
+    /* Dedup by address. */
+    uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    for (size_t i = 0; i < s_trackers.count; ++i) {
+        if (memcmp(s_trackers.trackers[i].addr, desc->addr.val, 6) == 0) {
+            s_trackers.trackers[i].last_seen = now;
+            if (desc->rssi > s_trackers.trackers[i].rssi)
+                s_trackers.trackers[i].rssi = desc->rssi;
+            return 0;
+        }
+    }
+
+    if (s_trackers.count >= BLE_TRACKER_MAX) return 0;
+
+    nesso_ble_tracker_t *t = &s_trackers.trackers[s_trackers.count++];
+    memcpy(t->addr, desc->addr.val, 6);
+    strncpy(t->type, type, sizeof(t->type) - 1);
+    t->rssi = desc->rssi;
+    t->first_seen = now;
+    t->last_seen = now;
+
+    if (s_tracker_cb) s_tracker_cb(t, s_tracker_cb_user);
+
+    ESP_LOGW(TAG, "TRACKER DETECTED: %s rssi=%d", type, desc->rssi);
+    return 0;
+}
+
+esp_err_t nesso_ble_tracker_start(nesso_ble_tracker_cb_t cb, void *user)
+{
+    if (!s_initted) return ESP_ERR_INVALID_STATE;
+    if (s_tracker_running) return ESP_OK;
+    if (s_spam_running) nesso_ble_spam_stop();
+
+    memset(&s_trackers, 0, sizeof(s_trackers));
+    s_tracker_cb = cb;
+    s_tracker_cb_user = user;
+
+    struct ble_gap_disc_params params = {
+        .itvl = 0, .window = 0,
+        .filter_policy = BLE_HCI_SCAN_FILT_NO_WL,
+        .limited = 0, .passive = 1, .filter_duplicates = 0,
+    };
+    /* Scan for a long time — 5 minutes continuous. */
+    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, 300000, &params, tracker_event_cb, NULL);
+    if (rc != 0) return ESP_FAIL;
+
+    s_tracker_running = true;
+    ESP_LOGI(TAG, "tracker detector running");
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_tracker_stop(void)
+{
+    if (!s_tracker_running) return ESP_OK;
+    ble_gap_disc_cancel();
+    s_tracker_running = false;
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_tracker_get(nesso_ble_tracker_result_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    *out = s_trackers;
+    return ESP_OK;
+}
+
+bool nesso_ble_tracker_is_active(void) { return s_tracker_running; }
+
+/* ==================== DEVICE CLONER ==================== */
+
+static bool s_clone_running = false;
+static uint8_t s_clone_data[31];
+static size_t  s_clone_len = 0;
+
+esp_err_t nesso_ble_clone_start(const nesso_ble_device_t *target)
+{
+    if (!s_initted || !target) return ESP_ERR_INVALID_ARG;
+    if (s_clone_running) nesso_ble_clone_stop();
+    if (s_spam_running) nesso_ble_spam_stop();
+
+    /* We don't have the raw adv data stored in nesso_ble_device_t,
+     * so we reconstruct a basic advertisement with the target's name. */
+    int off = 0;
+    /* Flags */
+    s_clone_data[off++] = 0x02;
+    s_clone_data[off++] = 0x01;
+    s_clone_data[off++] = 0x06;
+    /* Complete local name. */
+    size_t name_len = strnlen(target->name, 19);
+    if (name_len > 0) {
+        s_clone_data[off++] = (uint8_t)(name_len + 1);
+        s_clone_data[off++] = 0x09;  /* complete name */
+        memcpy(s_clone_data + off, target->name, name_len);
+        off += name_len;
+    }
+    s_clone_len = off;
+
+    /* Use the target's MAC address if public. */
+    if (target->addr_type == 0) {
+        ble_hs_id_set_rnd(target->addr);  /* best effort */
+    }
+
+    struct ble_gap_adv_params adv_params = {
+        .conn_mode = BLE_GAP_CONN_MODE_NON,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min = 0x20, .itvl_max = 0x40,
+    };
+    ble_gap_adv_set_data(s_clone_data, (int)s_clone_len);
+    int rc = ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, BLE_HS_FOREVER,
+                               &adv_params, NULL, NULL);
+    if (rc != 0) return ESP_FAIL;
+
+    s_clone_running = true;
+    ESP_LOGI(TAG, "cloning: \"%s\"", target->name);
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_clone_stop(void)
+{
+    if (!s_clone_running) return ESP_OK;
+    ble_gap_adv_stop();
+    s_clone_running = false;
+    return ESP_OK;
+}
+
+bool nesso_ble_clone_is_active(void) { return s_clone_running; }
+
+/* ==================== BLE SNIFFER / LOGGER ==================== */
+
+static bool s_sniff_running = false;
+static FILE *s_sniff_file = NULL;
+static uint32_t s_sniff_count = 0;
+
+static int sniff_event_cb(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    if (event->type != BLE_GAP_EVENT_DISC) return 0;
+
+    const struct ble_gap_disc_desc *desc = &event->disc;
+    s_sniff_count++;
+
+    if (s_sniff_file) {
+        /* CSV: timestamp_ms, mac, addr_type, rssi, data_hex */
+        uint32_t ts = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        fprintf(s_sniff_file, "%lu,%02x:%02x:%02x:%02x:%02x:%02x,%u,%d,",
+                (unsigned long)ts,
+                desc->addr.val[5], desc->addr.val[4], desc->addr.val[3],
+                desc->addr.val[2], desc->addr.val[1], desc->addr.val[0],
+                desc->addr.type, desc->rssi);
+
+        for (int i = 0; i < desc->length_data; ++i)
+            fprintf(s_sniff_file, "%02x", desc->data[i]);
+        fprintf(s_sniff_file, "\n");
+
+        if (s_sniff_count % 50 == 0) fflush(s_sniff_file);
+    }
+    return 0;
+}
+
+esp_err_t nesso_ble_sniff_start(const char *csv_path)
+{
+    if (!s_initted) return ESP_ERR_INVALID_STATE;
+    if (s_sniff_running) return ESP_OK;
+    if (s_spam_running) nesso_ble_spam_stop();
+
+    if (!csv_path) csv_path = "/storage/ble_sniff.csv";
+
+    s_sniff_file = fopen(csv_path, "a");
+    if (!s_sniff_file) return ESP_FAIL;
+
+    /* Write header if file is new. */
+    fseek(s_sniff_file, 0, SEEK_END);
+    if (ftell(s_sniff_file) == 0) {
+        fprintf(s_sniff_file, "timestamp_ms,mac,addr_type,rssi,adv_data_hex\n");
+        fflush(s_sniff_file);
+    }
+
+    s_sniff_count = 0;
+
+    struct ble_gap_disc_params params = {
+        .itvl = 0, .window = 0,
+        .filter_policy = BLE_HCI_SCAN_FILT_NO_WL,
+        .limited = 0, .passive = 1, .filter_duplicates = 0,
+    };
+    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, 300000, &params, sniff_event_cb, NULL);
+    if (rc != 0) { fclose(s_sniff_file); s_sniff_file = NULL; return ESP_FAIL; }
+
+    s_sniff_running = true;
+    ESP_LOGI(TAG, "BLE sniffer → %s", csv_path);
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_sniff_stop(void)
+{
+    if (!s_sniff_running) return ESP_OK;
+    ble_gap_disc_cancel();
+    if (s_sniff_file) { fflush(s_sniff_file); fclose(s_sniff_file); s_sniff_file = NULL; }
+    s_sniff_running = false;
+    ESP_LOGI(TAG, "BLE sniff stopped: %lu packets", (unsigned long)s_sniff_count);
+    return ESP_OK;
+}
+
+bool nesso_ble_sniff_is_active(void) { return s_sniff_running; }
+uint32_t nesso_ble_sniff_count(void) { return s_sniff_count; }
+
+/* ==================== BEACON BROADCASTER ==================== */
+
+static bool s_beacon_running = false;
+
+esp_err_t nesso_ble_beacon_start(const uint8_t uuid[16], uint16_t major, uint16_t minor)
+{
+    if (!s_initted) return ESP_ERR_INVALID_STATE;
+    if (s_beacon_running) nesso_ble_beacon_stop();
+    if (s_spam_running) nesso_ble_spam_stop();
+
+    /* iBeacon advertisement: Apple manufacturer data format. */
+    uint8_t adv[30] = {
+        0x02, 0x01, 0x06,                  /* flags */
+        0x1a, 0xff, 0x4c, 0x00,            /* Apple manufacturer ID */
+        0x02, 0x15,                         /* iBeacon identifier */
+    };
+    memcpy(adv + 9, uuid, 16);             /* UUID */
+    adv[25] = (uint8_t)(major >> 8);
+    adv[26] = (uint8_t)(major & 0xFF);
+    adv[27] = (uint8_t)(minor >> 8);
+    adv[28] = (uint8_t)(minor & 0xFF);
+    adv[29] = 0xC5;                         /* TX power */
+
+    set_random_addr();
+    ble_gap_adv_set_data(adv, 30);
+
+    struct ble_gap_adv_params params = {
+        .conn_mode = BLE_GAP_CONN_MODE_NON,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min = 0xA0, .itvl_max = 0xF0,  /* ~100-150ms */
+    };
+    int rc = ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, BLE_HS_FOREVER,
+                               &params, NULL, NULL);
+    if (rc != 0) return ESP_FAIL;
+
+    s_beacon_running = true;
+    ESP_LOGI(TAG, "iBeacon broadcasting");
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_beacon_stop(void)
+{
+    if (!s_beacon_running) return ESP_OK;
+    ble_gap_adv_stop();
+    s_beacon_running = false;
+    return ESP_OK;
+}

@@ -71,6 +71,10 @@ typedef enum {
     UI_WIFI_DAVEYGOTCHI,
     UI_BT_MENU,
     UI_BT_SCAN,
+    UI_BT_TRACKER,
+    UI_BT_SNIFF,
+    UI_BT_BEACON,
+    UI_BT_SPAM_MENU,
     UI_BT_SPAM_APPLE,
     UI_BT_SPAM_SAMSUNG,
     UI_BT_SPAM_GOOGLE,
@@ -377,13 +381,22 @@ static const menu_item_t s_main_items[] = {
 /* Bluetooth Menu */
 static const menu_item_t s_bt_items[] = {
     { "> BLE Scan",       UI_BT_SCAN },
-    { "> Spam: Apple",    UI_BT_SPAM_APPLE },
-    { "> Spam: Samsung",  UI_BT_SPAM_SAMSUNG },
-    { "> Spam: Google",   UI_BT_SPAM_GOOGLE },
-    { "> Spam: Windows",  UI_BT_SPAM_WINDOWS },
-    { "> Spam: ALL",      UI_BT_SPAM_ALL },
+    { "> Tracker Detect", UI_BT_TRACKER },
+    { "> BLE Sniffer",    UI_BT_SNIFF },
+    { "> iBeacon",        UI_BT_BEACON },
+    { "> BLE Spam",       UI_BT_SPAM_MENU },
 };
-#define BT_ITEM_COUNT 6
+#define BT_ITEM_COUNT 5
+
+/* BLE Spam submenu */
+static const menu_item_t s_bt_spam_items[] = {
+    { "> Apple (20+)",    UI_BT_SPAM_APPLE },
+    { "> Samsung",        UI_BT_SPAM_SAMSUNG },
+    { "> Google",         UI_BT_SPAM_GOOGLE },
+    { "> Windows",        UI_BT_SPAM_WINDOWS },
+    { "> ALL Platforms",  UI_BT_SPAM_ALL },
+};
+#define BT_SPAM_ITEM_COUNT 5
 
 /* Sub-GHz Menu */
 static const menu_item_t s_subghz_items[] = {
@@ -968,6 +981,58 @@ static void navigate(ui_state_t state)
     case UI_BT_MENU:
         build_menu("Bluetooth", s_bt_items, BT_ITEM_COUNT);
         break;
+    case UI_BT_SPAM_MENU:
+        build_menu("BLE Spam", s_bt_spam_items, BT_SPAM_ITEM_COUNT);
+        break;
+    case UI_BT_TRACKER:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "TRACKER DETECT");
+        s_dyn_count = 0;
+        lv_obj_t *st = make_label(s_screen, 30, COL_YELLOW, "Scanning for trackers...");
+        track(st); /* 0 */
+        lv_obj_t *cnt = make_label(s_screen, 55, COL_CYAN, "0 found");
+        track(cnt); /* 1 */
+
+        if (!nesso_ble_is_ready()) nesso_ble_init();
+        nesso_ble_tracker_start(NULL, NULL);
+        nesso_buzzer_init();
+        break;
+    }
+    case UI_BT_SNIFF:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "BLE SNIFFER");
+        s_dyn_count = 0;
+        lv_obj_t *st = make_label(s_screen, 30, COL_GREEN, "Logging to SPIFFS...");
+        track(st); /* 0 */
+
+        if (!nesso_ble_is_ready()) nesso_ble_init();
+        nesso_ble_sniff_start(NULL);
+        break;
+    }
+    case UI_BT_BEACON:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "iBEACON");
+        s_dyn_count = 0;
+        make_label(s_screen, 30, COL_CYAN, "Broadcasting iBeacon");
+        make_label(s_screen, 55, COL_YELLOW, "DAVEY-JONES-BEACON");
+
+        if (!nesso_ble_is_ready()) nesso_ble_init();
+        const uint8_t uuid[16] = {
+            0xDA, 0x7E, 0x10, 0x0E, 0x4A, 0x4F, 0x4E, 0x45,
+            0x53, 0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x13, 0x37,
+        };
+        nesso_ble_beacon_start(uuid, 0x0001, 0x0001);
+        break;
+    }
     case UI_BT_SCAN:
     {
         s_screen = lv_obj_create(NULL);
@@ -1169,6 +1234,7 @@ static void handle_select(void)
     case UI_WIFI_MENU:
     case UI_IR_MENU:
     case UI_BT_MENU:
+    case UI_BT_SPAM_MENU:
     case UI_SUBGHZ_MENU:
         if (items && s_cursor < count) {
             s_has_pending = true;
@@ -1254,7 +1320,8 @@ static const menu_item_t *current_menu_items(int *out_count)
     case UI_MAIN_MENU: *out_count = MAIN_ITEM_COUNT; return s_main_items;
     case UI_WIFI_MENU: *out_count = WIFI_ITEM_COUNT; return s_wifi_items;
     case UI_IR_MENU:     *out_count = IR_ITEM_COUNT;     return s_ir_items;
-    case UI_BT_MENU:     *out_count = BT_ITEM_COUNT;     return s_bt_items;
+    case UI_BT_MENU:      *out_count = BT_ITEM_COUNT;      return s_bt_items;
+    case UI_BT_SPAM_MENU: *out_count = BT_SPAM_ITEM_COUNT; return s_bt_spam_items;
     case UI_SUBGHZ_MENU: *out_count = SUBGHZ_ITEM_COUNT; return s_subghz_items;
     default: *out_count = 0; return NULL;
     }
@@ -1340,6 +1407,40 @@ static void refresh_cb(lv_timer_t *t)
         nesso_led(s_tvbg_rounds % 2 == 0);
         break;
     }
+    case UI_BT_TRACKER:
+    {
+        nesso_ble_tracker_result_t tr;
+        nesso_ble_tracker_get(&tr);
+        if (s_dyn_count >= 2) {
+            if (tr.count > 0) {
+                char buf[200] = "";
+                int off = snprintf(buf, sizeof(buf), "%zu tracker(s)!\n", tr.count);
+                for (size_t i = 0; i < tr.count && i < 4; ++i) {
+                    off += snprintf(buf + off, sizeof(buf) - off,
+                        "%s %ddBm %lus\n",
+                        tr.trackers[i].type, tr.trackers[i].rssi,
+                        (unsigned long)((tr.trackers[i].last_seen -
+                                        tr.trackers[i].first_seen) / 1000));
+                }
+                lv_label_set_text(s_dyn_labels[0], buf);
+                lv_obj_set_style_text_color(s_dyn_labels[0], COL_RED, 0);
+                /* Buzzer alert! */
+                nesso_buzzer_tone(3000, 0);
+            } else {
+                static bool dot = false; dot = !dot;
+                lv_label_set_text(s_dyn_labels[0],
+                    dot ? "Scanning for trackers..." : "Scanning for trackers.  ");
+            }
+            lv_label_set_text_fmt(s_dyn_labels[1], "%zu found", tr.count);
+        }
+        break;
+    }
+    case UI_BT_SNIFF:
+        if (s_dyn_count >= 1) {
+            lv_label_set_text_fmt(s_dyn_labels[0], "Packets: %lu",
+                                  (unsigned long)nesso_ble_sniff_count());
+        }
+        break;
     case UI_BT_SPAM_APPLE:
     case UI_BT_SPAM_SAMSUNG:
     case UI_BT_SPAM_GOOGLE:
@@ -1544,6 +1645,7 @@ static void button_task(void *arg)
             case UI_WIFI_MENU:
             case UI_IR_MENU:
             case UI_BT_MENU:
+            case UI_BT_SPAM_MENU:
             case UI_SUBGHZ_MENU:
             {
                 int count = 0;
@@ -1602,13 +1704,29 @@ static void button_task(void *arg)
             case UI_BT_SCAN:
                 navigate(UI_BT_MENU);
                 break;
+            case UI_BT_TRACKER:
+                nesso_ble_tracker_stop();
+                nesso_buzzer_off();
+                navigate(UI_BT_MENU);
+                break;
+            case UI_BT_SNIFF:
+                nesso_ble_sniff_stop();
+                navigate(UI_BT_MENU);
+                break;
+            case UI_BT_BEACON:
+                nesso_ble_beacon_stop();
+                navigate(UI_BT_MENU);
+                break;
+            case UI_BT_SPAM_MENU:
+                navigate(UI_BT_MENU);
+                break;
             case UI_BT_SPAM_APPLE:
             case UI_BT_SPAM_SAMSUNG:
             case UI_BT_SPAM_GOOGLE:
             case UI_BT_SPAM_WINDOWS:
             case UI_BT_SPAM_ALL:
                 nesso_ble_spam_stop();
-                navigate(UI_BT_MENU);
+                navigate(UI_BT_SPAM_MENU);
                 break;
             case UI_SUBGHZ_MENU:
                 navigate(UI_MAIN_MENU);
