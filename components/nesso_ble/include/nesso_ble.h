@@ -1,9 +1,5 @@
 /*
- * nesso_ble — BLE scanner + spam for DAVEY JONES.
- *
- * ESP32-C6 has BLE 5.0 only (no Classic Bluetooth).
- * Scanner: discover nearby BLE devices with name/MAC/RSSI.
- * Spam: broadcast fake pairing notifications to nearby phones.
+ * nesso_ble — BLE scanner + spam + tracker detection.
  */
 #pragma once
 
@@ -16,8 +12,6 @@
 extern "C" {
 #endif
 
-/* -------------------- init -------------------- */
-
 esp_err_t nesso_ble_init(void);
 esp_err_t nesso_ble_deinit(void);
 bool nesso_ble_is_ready(void);
@@ -28,9 +22,11 @@ bool nesso_ble_is_ready(void);
 
 typedef struct {
     uint8_t  addr[6];
-    char     name[20];   /* truncated if longer */
+    char     name[20];
+    char     type[10];   /* "Apple", "Samsung", "AirTag", "HID", "BLE", etc. */
     int8_t   rssi;
-    uint8_t  addr_type;  /* 0=public, 1=random */
+    uint8_t  addr_type;
+    bool     is_tracker; /* AirTag / SmartTag / Tile detected */
 } nesso_ble_device_t;
 
 typedef struct {
@@ -38,30 +34,25 @@ typedef struct {
     size_t count;
 } nesso_ble_scan_result_t;
 
-/**
- * Start a BLE scan for the given duration. Blocks until complete.
- * Results are deduped by address.
- */
+/** Passive BLE scan. Sorted by RSSI descending. */
 esp_err_t nesso_ble_scan(uint32_t duration_sec, nesso_ble_scan_result_t *out);
 
 /* -------------------- spam -------------------- */
 
 typedef enum {
-    BLE_SPAM_APPLE = 0,    /* Fake AirPod/Beats pairing popups on iPhones */
-    BLE_SPAM_SAMSUNG,      /* Samsung SmartTag notifications */
-    BLE_SPAM_GOOGLE,       /* Google Fast Pair popups on Android */
-    BLE_SPAM_WINDOWS,      /* Windows Swift Pair notifications */
-    BLE_SPAM_ALL,          /* Cycle through all of the above */
+    BLE_SPAM_APPLE = 0,
+    BLE_SPAM_SAMSUNG,
+    BLE_SPAM_GOOGLE,
+    BLE_SPAM_WINDOWS,
+    BLE_SPAM_ALL,
 } nesso_ble_spam_type_t;
 
-/** Start broadcasting spam advertisements. Non-blocking — runs in background. */
 esp_err_t nesso_ble_spam_start(nesso_ble_spam_type_t type);
-
-/** Stop spam. */
 esp_err_t nesso_ble_spam_stop(void);
-
-/** True if spam is currently running. */
 bool nesso_ble_spam_is_active(void);
+
+/** Number of advertisements sent since spam started. */
+uint32_t nesso_ble_spam_sent(void);
 
 #ifdef __cplusplus
 }

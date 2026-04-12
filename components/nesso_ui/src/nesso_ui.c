@@ -999,13 +999,15 @@ static void navigate(ui_state_t state)
         lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
         make_title_bar(s_screen, spam_names[state - UI_BT_SPAM_APPLE]);
         s_dyn_count = 0;
-        make_label(s_screen, 40, COL_RED, "Broadcasting...");
-        make_label(s_screen, 65, COL_CYAN,
-            t == BLE_SPAM_APPLE   ? "Fake AirPod popups" :
+        lv_obj_t *desc = make_label(s_screen, 40, COL_CYAN,
+            t == BLE_SPAM_APPLE   ? "20+ Apple device popups" :
             t == BLE_SPAM_SAMSUNG ? "SmartTag notifications" :
             t == BLE_SPAM_GOOGLE  ? "Fast Pair popups" :
             t == BLE_SPAM_WINDOWS ? "Swift Pair popups" :
-                                    "All platforms");
+                                    "All platforms cycling");
+        (void)desc;
+        lv_obj_t *cnt = make_label(s_screen, 65, COL_RED, "Sent: 0");
+        track(cnt); /* 0: spam counter */
         lv_obj_t *hint = lv_label_create(s_screen);
         lv_label_set_text(hint, "KEY2:stop");
         lv_obj_set_style_text_color(hint, COL_WHITE, 0);
@@ -1338,6 +1340,18 @@ static void refresh_cb(lv_timer_t *t)
         nesso_led(s_tvbg_rounds % 2 == 0);
         break;
     }
+    case UI_BT_SPAM_APPLE:
+    case UI_BT_SPAM_SAMSUNG:
+    case UI_BT_SPAM_GOOGLE:
+    case UI_BT_SPAM_WINDOWS:
+    case UI_BT_SPAM_ALL:
+        if (s_dyn_count >= 1 && nesso_ble_spam_is_active()) {
+            static bool bl = false; bl = !bl;
+            lv_label_set_text_fmt(s_dyn_labels[0], "Sent: %lu %s",
+                                  (unsigned long)nesso_ble_spam_sent(),
+                                  bl ? ">>>" : "   ");
+        }
+        break;
     case UI_BT_SCAN:
     {
         if (!s_bt_scan_done) {
@@ -1346,17 +1360,20 @@ static void refresh_cb(lv_timer_t *t)
             nesso_ble_scan_result_t result;
             nesso_ble_scan(5, &result);
             if (s_dyn_count >= 1) {
-                char buf[200] = "";
+                char buf[300] = "";
                 int off = 0;
+                off += snprintf(buf, sizeof(buf), "%zu devices found:\n",
+                                result.count);
                 for (size_t i = 0; i < result.count && i < 8; ++i) {
-                    const char *name = result.devices[i].name[0]
-                        ? result.devices[i].name : "Unknown";
+                    const nesso_ble_device_t *d = &result.devices[i];
+                    const char *name = d->name[0] ? d->name : "???";
                     off += snprintf(buf + off, sizeof(buf) - off,
-                        "%-12.12s %ddBm\n", name, result.devices[i].rssi);
+                        "%-6s %-10.10s %d\n",
+                        d->type, name, d->rssi);
                 }
                 if (result.count > 8)
                     snprintf(buf + off, sizeof(buf) - off, "+%zu more", result.count - 8);
-                else if (result.count == 0)
+                if (result.count == 0)
                     snprintf(buf, sizeof(buf), "No devices found");
                 lv_label_set_text(s_dyn_labels[0], buf);
                 lv_obj_set_style_text_color(s_dyn_labels[0],
