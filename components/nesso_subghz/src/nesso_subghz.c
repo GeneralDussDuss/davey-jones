@@ -62,17 +62,20 @@ esp_err_t nesso_subghz_sweep(subghz_band_t band, subghz_spectrum_t *out)
      */
     sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
 
+    /* Use GFSK (FSK) mode for the sweep — wider bandwidth than LoRa,
+     * gives better RSSI readings for arbitrary signals. */
+    sx126x_set_pkt_type(ctx, SX126X_PKT_TYPE_GFSK);
+
     for (int i = 0; i < SUBGHZ_SPECTRUM_POINTS; ++i) {
         uint32_t freq = out->freq_start_hz + (uint32_t)i * step;
 
-        /* Set frequency in standby, then enter RX. */
+        /* Standby → set freq → RX → dwell → read RSSI → standby. */
         sx126x_set_rf_freq(ctx, freq);
-        sx126x_set_rx(ctx, 0);
+        sx126x_set_rx(ctx, 100);  /* 100ms timeout — we'll read before it expires */
 
-        /* Wait for PLL lock + receiver to settle. */
-        esp_rom_delay_us(600);
+        /* Dwell 2ms: PLL lock (~500µs) + receiver settle (~1ms) + RSSI valid. */
+        vTaskDelay(pdMS_TO_TICKS(2));
 
-        /* Read instantaneous RSSI. */
         int8_t rssi = -128;
         sx126x_get_rssi_inst(ctx, &rssi);
 
@@ -82,9 +85,11 @@ esp_err_t nesso_subghz_sweep(subghz_band_t band, subghz_spectrum_t *out)
             out->peak_freq_hz = freq;
         }
 
-        /* Back to standby for next frequency. */
         sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
     }
+
+    /* Restore LoRa mode for other functions. */
+    sx126x_set_pkt_type(ctx, SX126X_PKT_TYPE_LORA);
 
     return ESP_OK;
 }

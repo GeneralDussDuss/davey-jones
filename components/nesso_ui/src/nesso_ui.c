@@ -848,20 +848,20 @@ static void navigate(ui_state_t state)
         s_dyn_count = 0;
 
         /* Landscape: 240 wide x 135 tall.
-         * Layout: band info (top) → canvas (middle) → peak info (bottom) */
-        lv_obj_t *band_lbl = make_label(s_screen, 2, COL_GREEN, "WIDE 400-930  2xtap:band");
+         * Push content down 10px to avoid rotation clipping at top. */
+        lv_obj_t *band_lbl = make_label(s_screen, 10, COL_GREEN, "WIDE 400-930  2xtap:band");
         track(band_lbl); /* 0: band info */
 
-        /* Canvas for waveform — 240 wide x 100 tall, below the band label. */
-        static lv_color_t cbuf[240 * 100];
+        /* Canvas for waveform — 230 wide x 85 tall. */
+        static lv_color_t cbuf[230 * 85];
         lv_obj_t *canvas = lv_canvas_create(s_screen);
-        lv_canvas_set_buffer(canvas, cbuf, 240, 100, LV_COLOR_FORMAT_RGB565);
-        lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 0, 18);
+        lv_canvas_set_buffer(canvas, cbuf, 230, 85, LV_COLOR_FORMAT_RGB565);
+        lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 5, 28);
         lv_canvas_fill_bg(canvas, COL_BLACK, LV_OPA_COVER);
         track(canvas); /* 1: canvas */
 
         /* Peak info at bottom. */
-        lv_obj_t *peak_lbl = make_label(s_screen, 120, COL_YELLOW, "Peak: ---");
+        lv_obj_t *peak_lbl = make_label(s_screen, 118, COL_YELLOW, "Peak: ---");
         track(peak_lbl); /* 2: peak info */
 
         nesso_buzzer_init();
@@ -1129,15 +1129,15 @@ static void refresh_cb(lv_timer_t *t)
                               (unsigned long)((s_spectrum.peak_freq_hz % 1000000) / 10000),
                               s_spectrum.rssi_peak);
 
-        /* Draw waveform on canvas (240 x 100). */
+        /* Draw waveform on canvas (230 x 85). */
         lv_obj_t *canvas = s_dyn_labels[1];
         lv_canvas_fill_bg(canvas, COL_BLACK, LV_OPA_COVER);
 
-        for (int x = 0; x < SUBGHZ_SPECTRUM_POINTS && x < 240; ++x) {
+        for (int x = 0; x < SUBGHZ_SPECTRUM_POINTS && x < 230; ++x) {
             int rssi = s_spectrum.rssi[x];
-            int height = (rssi + 128) * 99 / 128;
+            int height = (rssi + 128) * 84 / 128;
             if (height < 0) height = 0;
-            if (height > 99) height = 99;
+            if (height > 84) height = 84;
 
             lv_color_t color;
             if (rssi > -60) color = COL_RED;
@@ -1145,7 +1145,7 @@ static void refresh_cb(lv_timer_t *t)
             else if (rssi > -100) color = COL_GREEN;
             else color = COL_CYAN;
 
-            for (int y = 99; y >= 99 - height; --y) {
+            for (int y = 84; y >= 84 - height; --y) {
                 lv_canvas_set_px(canvas, x, y, color, LV_OPA_COVER);
             }
         }
