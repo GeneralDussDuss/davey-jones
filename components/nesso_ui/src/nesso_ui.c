@@ -307,7 +307,7 @@ static const menu_item_t s_subghz_items[] = {
 #define SUBGHZ_ITEM_COUNT 3
 
 /* Sub-GHz state */
-static subghz_band_t     s_subghz_band = SUBGHZ_BAND_433;
+static subghz_band_t     s_subghz_band = SUBGHZ_BAND_WIDE;
 static subghz_spectrum_t s_spectrum = {0};
 static subghz_capture_t  s_capture  = {0};
 static bool              s_has_capture = false;
@@ -849,7 +849,7 @@ static void navigate(ui_state_t state)
 
         /* Landscape: 240 wide x 135 tall.
          * Layout: band info (top) → canvas (middle) → peak info (bottom) */
-        lv_obj_t *band_lbl = make_label(s_screen, 2, COL_GREEN, "433 MHz  2xtap:band");
+        lv_obj_t *band_lbl = make_label(s_screen, 2, COL_GREEN, "WIDE 400-930  2xtap:band");
         track(band_lbl); /* 0: band info */
 
         /* Canvas for waveform — 240 wide x 100 tall, below the band label. */
@@ -1028,7 +1028,7 @@ static void handle_select(void)
 
     case UI_SUBGHZ_ANALYZER:
         /* Double-tap cycles bands. */
-        s_subghz_band = (subghz_band_t)((s_subghz_band + 1) % 3);
+        s_subghz_band = (subghz_band_t)((s_subghz_band + 1) % SUBGHZ_BAND_COUNT);
         break;
 
     default:
@@ -1120,8 +1120,9 @@ static void refresh_cb(lv_timer_t *t)
         if (s_dyn_count < 3) break;
         nesso_subghz_sweep(s_subghz_band, &s_spectrum);
 
-        static const char *band_names[] = { "433 MHz", "868 MHz", "915 MHz" };
-        lv_label_set_text_fmt(s_dyn_labels[0], "%s  2xtap:band", band_names[s_subghz_band]);
+        static const char *band_names[] = { "WIDE 400-930", "433 MHz", "868 MHz", "915 MHz" };
+        lv_label_set_text_fmt(s_dyn_labels[0], "%s  2xtap:band",
+                              band_names[s_subghz_band % SUBGHZ_BAND_COUNT]);
 
         lv_label_set_text_fmt(s_dyn_labels[2], "Peak: %lu.%02lu MHz %ddBm",
                               (unsigned long)(s_spectrum.peak_freq_hz / 1000000),

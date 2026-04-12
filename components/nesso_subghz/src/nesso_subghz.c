@@ -31,15 +31,15 @@ extern const void *nesso_sx1262_get_hal_ctx(void);
 
 static const char *TAG = "subghz";
 
-/* Band definitions. */
-static const uint32_t s_band_start[] = { 430000000, 860000000, 900000000 };
-static const uint32_t s_band_end[]   = { 440000000, 870000000, 928000000 };
+/* Band definitions — index matches subghz_band_t. */
+static const uint32_t s_band_start[] = { 400000000, 430000000, 860000000, 900000000 };
+static const uint32_t s_band_end[]   = { 930000000, 440000000, 870000000, 928000000 };
 
 /* -------------------- spectrum analyzer -------------------- */
 
 esp_err_t nesso_subghz_sweep(subghz_band_t band, subghz_spectrum_t *out)
 {
-    if (!out || band > SUBGHZ_BAND_915) return ESP_ERR_INVALID_ARG;
+    if (!out || band >= SUBGHZ_BAND_COUNT) return ESP_ERR_INVALID_ARG;
 
     const void *ctx = nesso_sx1262_get_hal_ctx();
     if (!ctx) return ESP_ERR_INVALID_STATE;
@@ -52,17 +52,25 @@ esp_err_t nesso_subghz_sweep(subghz_band_t band, subghz_spectrum_t *out)
 
     uint32_t step = (out->freq_end_hz - out->freq_start_hz) / SUBGHZ_SPECTRUM_POINTS;
 
-    /* Put radio in RX continuous for RSSI reads. */
+    /*
+     * CRITICAL: the SX1262 frequency register only takes effect when
+     * transitioning from standby to RX/TX. You CANNOT change frequency
+     * while already in RX — the radio stays on the old frequency.
+     *
+     * Correct sweep: for each point, go standby → set freq → RX → read RSSI.
+     * This is slower (~1ms per point = ~240ms per sweep) but actually works.
+     */
     sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
-    sx126x_set_pkt_type(ctx, SX126X_PKT_TYPE_LORA);
-    sx126x_set_rx(ctx, 0);  /* continuous RX */
 
     for (int i = 0; i < SUBGHZ_SPECTRUM_POINTS; ++i) {
         uint32_t freq = out->freq_start_hz + (uint32_t)i * step;
-        sx126x_set_rf_freq(ctx, freq);
 
-        /* PLL settle time — SX1262 needs ~500µs to lock on new freq. */
-        esp_rom_delay_us(500);
+        /* Set frequency in standby, then enter RX. */
+        sx126x_set_rf_freq(ctx, freq);
+        sx126x_set_rx(ctx, 0);
+
+        /* Wait for PLL lock + receiver to settle. */
+        esp_rom_delay_us(600);
 
         /* Read instantaneous RSSI. */
         int8_t rssi = -128;
@@ -73,10 +81,10 @@ esp_err_t nesso_subghz_sweep(subghz_band_t band, subghz_spectrum_t *out)
             out->rssi_peak = rssi;
             out->peak_freq_hz = freq;
         }
-    }
 
-    /* Back to standby. */
-    sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
+        /* Back to standby for next frequency. */
+        sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
+    }
 
     return ESP_OK;
 }
