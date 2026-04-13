@@ -41,6 +41,7 @@
 #include "nesso_eapol.h"
 #include "nesso_wifi.h"
 #include "nesso_portal.h"
+#include "nesso_zigbee.h"
 #include "nesso_ir.h"
 #include "nesso_subghz.h"
 #include "nesso_buzzer.h"
@@ -91,6 +92,11 @@ typedef enum {
     UI_SALTY_SCAN,
     UI_SALTY_CONTROL,
     UI_EASTER_EGG,
+    UI_ZIGBEE_MENU,
+    UI_ZIGBEE_SCAN,
+    UI_ZIGBEE_LOG,
+    UI_FILE_BROWSER,
+    UI_SETTINGS,
     UI_SUBGHZ_MENU,
     UI_SUBGHZ_ANALYZER,
     UI_SUBGHZ_CAPTURE,
@@ -397,12 +403,22 @@ static void build_menu(const char *title, const menu_item_t *items, int count)
 static const menu_item_t s_main_items[] = {
     { "> WiFi",      UI_WIFI_MENU },
     { "> Bluetooth", UI_BT_MENU },
+    { "> 802.15.4",  UI_ZIGBEE_MENU },
     { "> Sub-GHz",   UI_SUBGHZ_MENU },
     { "> IR",        UI_IR_MENU },
+    { "> Files",     UI_FILE_BROWSER },
+    { "> Settings",  UI_SETTINGS },
     { "> Salty Deep",  UI_SALTY_DEEP },
     { "> The Locker",  UI_EASTER_EGG },
 };
-#define MAIN_ITEM_COUNT 6
+#define MAIN_ITEM_COUNT 9
+
+/* Zigbee/Thread menu */
+static const menu_item_t s_zigbee_items[] = {
+    { "> Scan Devices",  UI_ZIGBEE_SCAN },
+    { "> Packet Logger", UI_ZIGBEE_LOG },
+};
+#define ZIGBEE_ITEM_COUNT 2
 
 /* Salty Deep */
 static const menu_item_t s_salty_items[] = {
@@ -1363,6 +1379,118 @@ static void navigate(ui_state_t state)
         track(canvas); /* 0: canvas */
         break;
     }
+    case UI_ZIGBEE_MENU:
+        build_menu("802.15.4", s_zigbee_items, ZIGBEE_ITEM_COUNT);
+        break;
+    case UI_ZIGBEE_SCAN:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "ZIGBEE SCAN");
+        s_dyn_count = 0;
+        lv_obj_t *st = make_label(s_screen, 30, COL_GREEN, "Scanning ch 11-26...");
+        track(st); /* 0: status */
+        lv_obj_t *cnt = make_label(s_screen, 55, COL_CYAN, "Devices: 0  Pkts: 0");
+        track(cnt); /* 1 */
+
+        if (!nesso_zigbee_is_ready()) nesso_zigbee_init();
+        nesso_zigbee_scan_start();
+        break;
+    }
+    case UI_ZIGBEE_LOG:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "802.15.4 LOGGER");
+        s_dyn_count = 0;
+        lv_obj_t *st = make_label(s_screen, 30, COL_GREEN, "Logging to SPIFFS...");
+        track(st);
+
+        if (!nesso_zigbee_is_ready()) nesso_zigbee_init();
+        nesso_zigbee_log_start(NULL);
+        nesso_zigbee_scan_start();
+        break;
+    }
+    case UI_FILE_BROWSER:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "FILES");
+        s_dyn_count = 0;
+
+        /* List SPIFFS files. */
+        char buf[300] = "Saved data:\n\n";
+        int off = strlen(buf);
+        const char *files[] = {
+            "/storage/wardrive.csv",
+            "/storage/handshakes.hc22000",
+            "/storage/ble_sniff.csv",
+            "/storage/zigbee_capture.csv",
+            "/storage/portal_creds.txt",
+            "/storage/capture.bin",
+        };
+        for (int i = 0; i < 6; ++i) {
+            FILE *f = fopen(files[i], "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long sz = ftell(f);
+                fclose(f);
+                const char *name = strrchr(files[i], '/') + 1;
+                off += snprintf(buf + off, sizeof(buf) - off,
+                    "%-20s %ldB\n", name, sz);
+            }
+        }
+        if (off == (int)strlen("Saved data:\n\n"))
+            strcat(buf, "(no files yet)");
+
+        make_label(s_screen, 30, COL_CYAN, buf);
+        lv_obj_t *h = lv_label_create(s_screen);
+        lv_label_set_text(h, "KEY2: back");
+        lv_obj_set_style_text_color(h, COL_WHITE, 0);
+        lv_obj_set_style_opa(h, LV_OPA_60, 0);
+        lv_obj_align(h, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
+    case UI_SETTINGS:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "SETTINGS");
+        s_dyn_count = 0;
+
+        char info[200];
+        uint32_t heap = esp_get_free_heap_size();
+        nesso_wardrive_status_t ws = {0};
+        nesso_eapol_status_t es = {0};
+        nesso_wardrive_status(&ws);
+        nesso_eapol_status(&es);
+
+        snprintf(info, sizeof(info),
+            "DAVEY JONES v0.1\n\n"
+            "Free RAM: %lu KB\n"
+            "APs seen: %u\n"
+            "PMKIDs: %lu\n"
+            "Uptime: %lus\n\n"
+            "MAC: 48:F6:EE:C4:CD:A4\n"
+            "Chip: ESP32-C6 RISC-V\n"
+            "IDF: v5.3.2",
+            (unsigned long)(heap / 1024),
+            (unsigned)ws.total_aps,
+            (unsigned long)es.pmkids_captured,
+            (unsigned long)(esp_timer_get_time() / 1000000ULL));
+        make_label(s_screen, 30, COL_CYAN, info);
+
+        lv_obj_t *h = lv_label_create(s_screen);
+        lv_label_set_text(h, "KEY2: back");
+        lv_obj_set_style_text_color(h, COL_WHITE, 0);
+        lv_obj_set_style_opa(h, LV_OPA_60, 0);
+        lv_obj_align(h, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
     case UI_SUBGHZ_MENU:
         build_menu("Sub-GHz", s_subghz_items, SUBGHZ_ITEM_COUNT);
         break;
@@ -1517,6 +1645,7 @@ static void handle_select(void)
     case UI_BT_BADKB_DEVICE:
     case UI_BT_BADKB_PAYLOAD:
     case UI_WIFI_PORTAL_MENU:
+    case UI_ZIGBEE_MENU:
     case UI_SALTY_DEEP:
     case UI_SUBGHZ_MENU:
         if (items && s_cursor < count) {
@@ -1641,6 +1770,7 @@ static const menu_item_t *current_menu_items(int *out_count)
     case UI_SALTY_DEEP:       *out_count = SALTY_ITEM_COUNT;          return s_salty_items;
     case UI_BT_MENU:      *out_count = BT_ITEM_COUNT;      return s_bt_items;
     case UI_BT_SPAM_MENU: *out_count = BT_SPAM_ITEM_COUNT; return s_bt_spam_items;
+    case UI_ZIGBEE_MENU: *out_count = ZIGBEE_ITEM_COUNT; return s_zigbee_items;
     case UI_SUBGHZ_MENU: *out_count = SUBGHZ_ITEM_COUNT; return s_subghz_items;
     default: *out_count = 0; return NULL;
     }
@@ -1811,6 +1941,35 @@ static void refresh_cb(lv_timer_t *t)
             }
         }
 #endif
+        break;
+    }
+    case UI_ZIGBEE_SCAN:
+    case UI_ZIGBEE_LOG:
+    {
+        nesso_zigbee_scan_t zs;
+        nesso_zigbee_scan_get(&zs);
+        if (s_dyn_count >= 2) {
+            if (zs.count > 0) {
+                char buf[200] = "";
+                int off = 0;
+                for (size_t i = 0; i < zs.count && i < 6; ++i) {
+                    off += snprintf(buf + off, sizeof(buf) - off,
+                        "%-6s 0x%04X PAN:%04X %d\n",
+                        zs.devices[i].type, zs.devices[i].short_addr,
+                        zs.devices[i].pan_id, zs.devices[i].rssi);
+                }
+                if (zs.count > 6)
+                    snprintf(buf + off, sizeof(buf) - off, "+%zu more", zs.count - 6);
+                lv_label_set_text(s_dyn_labels[0], buf);
+                lv_obj_set_style_text_color(s_dyn_labels[0], COL_CYAN, 0);
+            } else {
+                static bool zd = false; zd = !zd;
+                lv_label_set_text(s_dyn_labels[0],
+                    zd ? "Scanning ch 11-26..." : "Scanning ch 11-26.  ");
+            }
+            lv_label_set_text_fmt(s_dyn_labels[1], "Dev: %zu  Pkts: %lu  ch%u",
+                zs.count, (unsigned long)zs.packets_seen, zs.current_channel);
+        }
         break;
     }
     case UI_WIFI_PORTAL_ACTIVE:
@@ -2089,6 +2248,7 @@ static void button_task(void *arg)
             case UI_BT_BADKB_DEVICE:
             case UI_BT_BADKB_PAYLOAD:
             case UI_WIFI_PORTAL_MENU:
+            case UI_ZIGBEE_MENU:
             case UI_SALTY_DEEP:
             case UI_SUBGHZ_MENU:
             {
@@ -2219,6 +2379,22 @@ static void button_task(void *arg)
             case UI_BT_SPAM_ALL:
                 nesso_ble_spam_stop();
                 navigate(UI_BT_SPAM_MENU);
+                break;
+            case UI_ZIGBEE_MENU:
+                navigate(UI_MAIN_MENU);
+                break;
+            case UI_ZIGBEE_SCAN:
+                nesso_zigbee_scan_stop();
+                navigate(UI_ZIGBEE_MENU);
+                break;
+            case UI_ZIGBEE_LOG:
+                nesso_zigbee_scan_stop();
+                nesso_zigbee_log_stop();
+                navigate(UI_ZIGBEE_MENU);
+                break;
+            case UI_FILE_BROWSER:
+            case UI_SETTINGS:
+                navigate(UI_MAIN_MENU);
                 break;
             case UI_SUBGHZ_MENU:
                 navigate(UI_MAIN_MENU);

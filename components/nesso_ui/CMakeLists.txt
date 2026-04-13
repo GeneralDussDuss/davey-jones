@@ -13,6 +13,7 @@ idf_component_register(
         nesso_buzzer
         nesso_ble
         nesso_portal
+        nesso_zigbee
         esp_lcd
         esp_driver_i2c
     PRIV_REQUIRES
