@@ -200,7 +200,7 @@ static void dns_task(void *arg)
 
     while (s_active) {
         int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&client, &clen);
-        if (n < 12) continue;
+        if (n < 12 || n > (int)sizeof(buf) - 16) continue;  /* leave room for A record */
 
         /* Build minimal DNS response — point everything to 192.168.4.1 */
         buf[2] = 0x81; buf[3] = 0x80;  /* flags: response, no error */
@@ -248,8 +248,10 @@ esp_err_t nesso_portal_start(const nesso_portal_config_t *cfg)
         },
     };
     const char *ssid = cfg->ssid[0] ? cfg->ssid : s_template_ssids[s_template % PORTAL_TEMPLATE_COUNT];
-    strncpy((char *)ap_cfg.ap.ssid, ssid, sizeof(ap_cfg.ap.ssid));
-    ap_cfg.ap.ssid_len = strlen(ssid);
+    size_t ssid_len = strlen(ssid);
+    if (ssid_len > sizeof(ap_cfg.ap.ssid)) ssid_len = sizeof(ap_cfg.ap.ssid);
+    memcpy(ap_cfg.ap.ssid, ssid, ssid_len);
+    ap_cfg.ap.ssid_len = ssid_len;
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_AP), TAG, "set AP mode");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg), TAG, "set AP config");

@@ -152,6 +152,17 @@ static bool s_tvbg_done = false;
 static bool s_bt_scan_done = false;
 static bool s_salty_scanned = false;
 static bool s_cap_done = false;
+static bool s_wifi_scan_started = false;
+
+static void wifi_scan_task(void *arg)
+{
+    (void)arg;
+    nesso_wifi_scan(NULL, 0, NULL);
+    s_has_pending = true;
+    s_pending_nav = UI_WIFI_AP_LIST;
+    s_wifi_scan_started = false;
+    vTaskDelete(NULL);
+}
 
 /* Deferred IR command — sent outside the LVGL lock by the refresh timer. */
 static uint8_t s_ir_pending = 0xFF;  /* 0xFF = no pending command */
@@ -279,6 +290,33 @@ static void screen_tapped(lv_event_t *e)
     }
 }
 
+/* Swipe-back gesture handler. */
+static void screen_gesture(lv_event_t *e)
+{
+    lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    if (dir == LV_DIR_RIGHT) {
+        /* Swipe right = go back. Defer to refresh timer. */
+        s_nav_back = true;
+        /* Trigger back navigation for current state. */
+        switch (s_state) {
+        case UI_SPLASH:         s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        case UI_WIFI_MENU:      s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        case UI_BT_MENU:        s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        case UI_ZIGBEE_MENU:    s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        case UI_SUBGHZ_MENU:    s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        case UI_IR_MENU:        s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        case UI_BT_SPAM_MENU:   s_has_pending = true; s_pending_nav = UI_BT_MENU; break;
+        case UI_BT_BADKB_DEVICE: s_has_pending = true; s_pending_nav = UI_BT_MENU; break;
+        case UI_BT_BADKB_PAYLOAD: s_has_pending = true; s_pending_nav = UI_BT_BADKB_DEVICE; break;
+        case UI_WIFI_PORTAL_MENU: s_has_pending = true; s_pending_nav = UI_WIFI_MENU; break;
+        case UI_SALTY_DEEP:     s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        case UI_FILE_BROWSER:   s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        case UI_SETTINGS:       s_has_pending = true; s_pending_nav = UI_MAIN_MENU; break;
+        default: break;  /* screens that need explicit stop (portal, deauth, etc.) use KEY2 */
+        }
+    }
+}
+
 /* -------------------- screen builders -------------------- */
 
 static void navigate(ui_state_t state);
@@ -321,7 +359,7 @@ static void build_splash(void)
     lv_anim_start(&a1);
 
     lv_obj_t *sub = lv_label_create(s_screen);
-    lv_label_set_text(sub, "v0.1 // tap to start");
+    lv_label_set_text(sub, "v0.1 // 16 modules\ntap to start");
     lv_obj_set_style_text_color(sub, COL_CYAN, 0);
     lv_obj_align(sub, LV_ALIGN_BOTTOM_MID, 0, -4);
     lv_obj_set_style_opa(sub, LV_OPA_TRANSP, 0);
@@ -338,9 +376,17 @@ static void build_splash(void)
 
 /* Menu item builder helper (typedef is above, near forward declarations). */
 
-/* Styled title bar with accent line. */
+/* Styled title bar with accent line + subtle top gradient. */
 static void make_title_bar(lv_obj_t *parent, const char *title)
 {
+    /* Top accent bar — thin colored strip at top of screen. */
+    lv_obj_t *bar = lv_obj_create(parent);
+    lv_obj_remove_style_all(bar);
+    lv_obj_set_size(bar, 135, 2);
+    lv_obj_set_style_bg_color(bar, COL_MAGENTA, 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_80, 0);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+
     /* Title text. */
     lv_obj_t *t = lv_label_create(parent);
     lv_label_set_text(t, title);
@@ -352,8 +398,8 @@ static void make_title_bar(lv_obj_t *parent, const char *title)
     lv_obj_t *line = lv_line_create(parent);
     lv_line_set_points(line, line_pts, 2);
     lv_obj_set_style_line_color(line, COL_MAGENTA, 0);
-    lv_obj_set_style_line_width(line, 2, 0);
-    lv_obj_set_style_line_opa(line, LV_OPA_70, 0);
+    lv_obj_set_style_line_width(line, 1, 0);
+    lv_obj_set_style_line_opa(line, LV_OPA_40, 0);
     lv_obj_align(line, LV_ALIGN_TOP_MID, 0, 22);
 }
 
@@ -1594,6 +1640,7 @@ static void navigate(ui_state_t state)
     if (s_screen) {
         lv_obj_add_flag(s_screen, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(s_screen, screen_tapped, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(s_screen, screen_gesture, LV_EVENT_GESTURE, NULL);
 
         /* Smooth animated transitions. Back = slide right, forward = slide left. */
         lv_scr_load_anim_t anim;
@@ -1824,11 +1871,12 @@ static void refresh_cb(lv_timer_t *t)
         nesso_led(false);
     }
 
-    /* WiFi scanning auto-transition: run scan then show results. */
+    /* WiFi scanning: run in background task to avoid blocking LVGL. */
     if (s_state == UI_WIFI_SCANNING) {
-        /* Scan is blocking — run it, then navigate to AP list. */
-        nesso_wifi_scan(NULL, 0, NULL);
-        navigate(UI_WIFI_AP_LIST);
+        if (!s_wifi_scan_started) {
+            s_wifi_scan_started = true;
+            xTaskCreate(wifi_scan_task, "wifi_scan", 4096, NULL, 5, NULL);
+        }
         return;
     }
 
@@ -2220,11 +2268,14 @@ static void button_task(void *arg)
          *   Double-tap     = select (handled by touch callback)
          */
 
-        /* Emergency stop. */
+        /* Emergency stop — use blocking lock to prevent LVGL corruption. */
         if (evt.key == NESSO_KEY1 && evt.type == NESSO_BTN_EVT_LONG_PRESS) {
-            lvgl_port_lock(0);
+            lvgl_port_lock(portMAX_DELAY);
             if (s_deauth_active) stop_deauth();
             if (nesso_wifi_beacon_spam_is_active()) nesso_wifi_beacon_spam_stop();
+            if (nesso_ble_spam_is_active()) nesso_ble_spam_stop();
+            if (nesso_ble_flood_is_active()) nesso_ble_flood_stop();
+            if (nesso_portal_is_active()) nesso_portal_stop();
             navigate(UI_MAIN_MENU);
             lvgl_port_unlock();
             continue;

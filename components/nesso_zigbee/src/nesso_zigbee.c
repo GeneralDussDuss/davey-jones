@@ -140,11 +140,12 @@ static void process_packet(const uint8_t *frame, uint8_t len, int8_t rssi, uint8
         }
     }
 
+    uint32_t pkt_num = s_scan.packets_seen;  /* capture before releasing lock */
     xSemaphoreGive(s_lock);
 
     /* Log raw frame. */
     if (s_log_file) {
-        fprintf(s_log_file, "%lu,%u,%d,", (unsigned long)s_scan.packets_seen, channel, rssi);
+        fprintf(s_log_file, "%lu,%u,%d,", (unsigned long)pkt_num, channel, rssi);
         for (int i = 0; i < len; ++i) fprintf(s_log_file, "%02x", frame[i]);
         fprintf(s_log_file, "\n");
         if (s_log_count++ % 20 == 0) fflush(s_log_file);
