@@ -39,7 +39,10 @@ esp_err_t nesso_zigbee_init(void)
     ESP_RETURN_ON_ERROR(esp_ieee802154_enable(), TAG, "enable 802.15.4");
     esp_ieee802154_set_promiscuous(true);
     esp_ieee802154_set_rx_when_idle(true);
+    esp_ieee802154_set_coordinator(false);
+    esp_ieee802154_set_panid(0xFFFF);  /* accept all PAN IDs */
     esp_ieee802154_set_channel(11);
+    esp_ieee802154_receive();  /* start receiving immediately */
 
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return ESP_ERR_NO_MEM;
@@ -117,8 +120,8 @@ static void process_packet(const uint8_t *frame, uint8_t len, int8_t rssi, uint8
     s_scan.packets_seen++;
     s_scan.current_channel = channel;
 
-    /* Dedup by short addr + PAN. */
-    if (src_short != 0 && src_short != 0xFFFF) {
+    /* Dedup by short addr + PAN. Include coordinator (0x0000) but skip broadcast. */
+    if (src_short != 0xFFFF && src_mode >= 2) {
         bool found = false;
         for (size_t i = 0; i < s_scan.count; ++i) {
             if (s_scan.devices[i].short_addr == src_short &&
