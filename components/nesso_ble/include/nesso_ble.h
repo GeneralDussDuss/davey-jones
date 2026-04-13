@@ -109,6 +109,9 @@ esp_err_t nesso_ble_hid_start(void);
 esp_err_t nesso_ble_hid_stop(void);
 bool nesso_ble_hid_is_connected(void);
 
+/** Get the current disguise name (e.g., "AirPods Pro"). Cycles each start. */
+const char *nesso_ble_hid_disguise_name(void);
+
 /** Type a string as keyboard input. Device must be paired first. */
 esp_err_t nesso_ble_hid_type(const char *text);
 

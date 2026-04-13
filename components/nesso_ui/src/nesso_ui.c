@@ -416,21 +416,39 @@ static const menu_item_t s_bt_items[] = {
 };
 #define BT_ITEM_COUNT 7
 
-/* Bad-KB payload presets — mix of pranks + pentesting. */
+/* Bad-KB payload presets — pranks + pentesting.
+ * KEY1 cycles through these. Double-tap types + Enter. */
 static const char *s_badkb_payloads[] = {
-    /* Pranks */
-    "I'm watching you.",
-    "YOUR PC HAS BEEN HACKED. Just kidding. Or am I?",
-    "Hey, I just wanted to let you know your fly is open.",
-    "Note to self: stop leaving my computer unlocked",
+    /* Rickroll — opens browser to Never Gonna Give You Up */
+    "powershell Start-Process 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'",
+    /* Classic pranks */
     "HELP IM TRAPPED INSIDE YOUR KEYBOARD",
+    "YOUR PC HAS BEEN HACKED. Just kidding. Or am I?",
+    "Note to self: stop leaving my computer unlocked",
+    "I'm watching you.",
+    "Hey, I just wanted to let you know your fly is open.",
     "All your base are belong to us",
+    "The FBI has logged your browsing history. Have a nice day.",
+    /* Talker — makes the computer speak */
+    "powershell Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('I am Davey Jones and I have taken control of your computer')",
+    /* Wallpaper changer — sets solid color */
+    "powershell Add-Type -TypeName WallpaperChanger -MemberDefinition '[DllImport(\"user32.dll\")] public static extern int SystemParametersInfo(int a,int b,string c,int d);' -Namespace Win; [Win.WallpaperChanger]::SystemParametersInfo(20,0,'',3)",
+    /* Flip screen upside down (Windows) */
+    "powershell Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class SR{[DllImport(\"user32.dll\")] public static extern bool EnumDisplaySettings(string d,int m,ref DEVMODE v);[DllImport(\"user32.dll\")] public static extern int ChangeDisplaySettings(ref DEVMODE v,int f);[StructLayout(LayoutKind.Sequential)] public struct DEVMODE{[MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)] public string n;public short v;public short z;public short s;public short d;public int f;public int p1;public int p2;public int p3;public int p4;public int p5;public int o;public int c;public int b;public int px;public int py;public int dr;public int fr;public int fc;public int fd;public int fw;public int fh;public int ff;}}';",
+    /* Mouse swap — swaps left and right mouse buttons */
+    "powershell [System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');[System.Windows.Forms.SystemInformation]::MouseButtonsSwapped",
+    /* Open 10 calculators */
+    "powershell 1..10 | ForEach-Object { Start-Process calc }",
+    /* Speak + rickroll combo */
+    "powershell Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('Never gonna give you up, never gonna let you down'); Start-Process 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'",
+    /* Matrix rain in terminal */
+    "powershell while($true){$r='';1..80|%{$r+=([char](Get-Random -Min 33 -Max 126))};Write-Host $r -ForegroundColor Green -NoNewline;Start-Sleep -Milliseconds 50}",
     /* Pentesting */
-    "Hello from Davey Jones!",
     "cmd /c whoami > %TEMP%\\pwned.txt",
     "powershell Get-Process | Out-File $env:TEMP\\procs.txt",
+    "powershell Get-NetIPAddress | Out-File $env:TEMP\\network.txt",
 };
-#define BADKB_PAYLOAD_COUNT 9
+#define BADKB_PAYLOAD_COUNT 18
 static int s_badkb_selected = 0;
 
 /* BLE Spam submenu */
@@ -1662,10 +1680,16 @@ static void refresh_cb(lv_timer_t *t)
     }
     case UI_BT_BADKB:
         if (s_dyn_count >= 1) {
-            lv_label_set_text(s_dyn_labels[0],
-                nesso_ble_hid_is_connected() ? "CONNECTED! Ready." : "Waiting for pair...");
-            lv_obj_set_style_text_color(s_dyn_labels[0],
-                nesso_ble_hid_is_connected() ? COL_GREEN : COL_YELLOW, 0);
+            if (nesso_ble_hid_is_connected()) {
+                lv_label_set_text(s_dyn_labels[0], "CONNECTED! Ready.");
+                lv_obj_set_style_text_color(s_dyn_labels[0], COL_GREEN, 0);
+            } else {
+                char status[32];
+                snprintf(status, sizeof(status), "As: %s",
+                         nesso_ble_hid_disguise_name());
+                lv_label_set_text(s_dyn_labels[0], status);
+                lv_obj_set_style_text_color(s_dyn_labels[0], COL_YELLOW, 0);
+            }
         }
         break;
     case UI_BT_FLOOD:

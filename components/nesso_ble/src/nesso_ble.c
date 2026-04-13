@@ -717,6 +717,7 @@ esp_err_t nesso_ble_beacon_stop(void)
 
 static bool s_hid_running = false;
 static bool s_hid_connected = false;
+static int s_last_disguise = 0;
 static uint16_t s_hid_conn = 0;
 static uint16_t s_hid_report_handle = 0;
 
@@ -803,16 +804,57 @@ esp_err_t nesso_ble_hid_start(void)
     if (s_hid_running) return ESP_OK;
     if (s_spam_running) nesso_ble_spam_stop();
 
-    /* Set device name. */
-    ble_svc_gap_device_name_set("Keyboard");
-
-    /* Start advertising as connectable. */
-    uint8_t adv_data[] = {
-        0x02, 0x01, 0x06,           /* Flags */
-        0x03, 0x03, 0x12, 0x18,     /* HID service UUID */
-        0x09, 0x09, 'K','e','y','b','o','a','r','d', /* Name */
+    /* Spoof as a real device name. */
+    static const struct {
+        const char *name;
+        uint8_t mac_prefix[3];  /* OUI — first 3 bytes of MAC */
+    } s_hid_disguises[] = {
+        { "AirPods Pro",          { 0x4C, 0x32, 0x75 } },  /* Apple OUI */
+        { "AirPods Max",          { 0x4C, 0x57, 0xBE } },
+        { "Beats Studio3",       { 0x4C, 0x74, 0x03 } },
+        { "Galaxy Buds Pro",     { 0xE8, 0x61, 0x7E } },  /* Samsung OUI */
+        { "Galaxy Buds2 Pro",    { 0xDC, 0xD3, 0xA2 } },
+        { "Bose QC45",           { 0x04, 0x52, 0xC7 } },  /* Bose OUI */
+        { "Bose NC700",          { 0x4C, 0x87, 0x5D } },
+        { "Sony WH-1000XM5",    { 0x94, 0xDB, 0x56 } },  /* Sony OUI */
+        { "JBL Flip 6",          { 0x00, 0x02, 0x5B } },  /* JBL/Harman */
+        { "Logitech K380",      { 0x34, 0x88, 0x5D } },  /* Logitech */
+        { "Magic Keyboard",      { 0x4C, 0xAB, 0x4F } },  /* Apple */
     };
-    ble_gap_adv_set_data(adv_data, sizeof(adv_data));
+    #define HID_DISGUISE_COUNT (sizeof(s_hid_disguises) / sizeof(s_hid_disguises[0]))
+
+    static int s_hid_disguise_idx = 0;
+    const char *dev_name = s_hid_disguises[s_hid_disguise_idx % HID_DISGUISE_COUNT].name;
+    const uint8_t *mac_oui = s_hid_disguises[s_hid_disguise_idx % HID_DISGUISE_COUNT].mac_prefix;
+
+    ble_svc_gap_device_name_set(dev_name);
+
+    /* Set MAC address with the correct OUI for the disguise. */
+    uint8_t fake_mac[6];
+    memcpy(fake_mac, mac_oui, 3);
+    fake_mac[3] = (uint8_t)(esp_random() & 0xFF);
+    fake_mac[4] = (uint8_t)(esp_random() & 0xFF);
+    fake_mac[5] = (uint8_t)(esp_random() & 0xFF);
+    fake_mac[0] |= 0xC0;  /* random static */
+    ble_hs_id_set_rnd(fake_mac);
+
+    /* Build adv data with spoofed name. */
+    size_t name_len = strlen(dev_name);
+    if (name_len > 20) name_len = 20;
+    uint8_t adv_data[31];
+    int adv_off = 0;
+    adv_data[adv_off++] = 0x02; adv_data[adv_off++] = 0x01; adv_data[adv_off++] = 0x06;
+    adv_data[adv_off++] = 0x03; adv_data[adv_off++] = 0x03; adv_data[adv_off++] = 0x12; adv_data[adv_off++] = 0x18;
+    adv_data[adv_off++] = (uint8_t)(name_len + 1);
+    adv_data[adv_off++] = 0x09;
+    memcpy(adv_data + adv_off, dev_name, name_len);
+    adv_off += name_len;
+
+    ble_gap_adv_set_data(adv_data, adv_off);
+
+    s_last_disguise = s_hid_disguise_idx;
+    ESP_LOGI(TAG, "Bad-KB: disguised as '%s'", dev_name);
+    s_hid_disguise_idx++;
 
     struct ble_gap_adv_params adv = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
@@ -840,6 +882,15 @@ esp_err_t nesso_ble_hid_stop(void)
 }
 
 bool nesso_ble_hid_is_connected(void) { return s_hid_connected; }
+const char *nesso_ble_hid_disguise_name(void) {
+    static const char *names[] = {
+        "AirPods Pro", "AirPods Max", "Beats Studio3",
+        "Galaxy Buds Pro", "Galaxy Buds2 Pro",
+        "Bose QC45", "Bose NC700", "Sony WH-1000XM5",
+        "JBL Flip 6", "Logitech K380", "Magic Keyboard",
+    };
+    return names[s_last_disguise % 11];
+}
 
 esp_err_t nesso_ble_hid_key(uint8_t keycode, uint8_t modifier)
 {
