@@ -102,6 +102,40 @@ uint32_t nesso_ble_sniff_count(void);
 esp_err_t nesso_ble_beacon_start(const uint8_t uuid[16], uint16_t major, uint16_t minor);
 esp_err_t nesso_ble_beacon_stop(void);
 
+/* -------------------- Bad-KB (BLE HID Keyboard) -------------------- */
+
+/** Start advertising as a BLE HID keyboard. Pairs with target device. */
+esp_err_t nesso_ble_hid_start(void);
+esp_err_t nesso_ble_hid_stop(void);
+bool nesso_ble_hid_is_connected(void);
+
+/** Type a string as keyboard input. Device must be paired first. */
+esp_err_t nesso_ble_hid_type(const char *text);
+
+/** Send a single keypress (HID usage code + modifier bitmask). */
+esp_err_t nesso_ble_hid_key(uint8_t keycode, uint8_t modifier);
+
+/** Common modifier bits. */
+#define HID_MOD_NONE  0x00
+#define HID_MOD_CTRL  0x01
+#define HID_MOD_SHIFT 0x02
+#define HID_MOD_ALT   0x04
+#define HID_MOD_GUI   0x08  /* Windows/Cmd key */
+
+/** Common HID keycodes. */
+#define HID_KEY_ENTER  0x28
+#define HID_KEY_TAB    0x2B
+#define HID_KEY_SPACE  0x2C
+#define HID_KEY_ESCAPE 0x29
+
+/* -------------------- BLE Flood/DoS -------------------- */
+
+/** Rapid connection attempts from random MACs to overwhelm target. */
+esp_err_t nesso_ble_flood_start(const uint8_t target_addr[6], uint8_t addr_type);
+esp_err_t nesso_ble_flood_stop(void);
+bool nesso_ble_flood_is_active(void);
+uint32_t nesso_ble_flood_count(void);
+
 /* -------------------- toy control (The Salty Deep) -------------------- */
 
 #define BLE_TOY_MAX 8

