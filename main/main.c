@@ -21,6 +21,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
@@ -68,6 +69,7 @@ static void IRAM_ATTR raw_promisc_test(void *buf, wifi_promiscuous_pkt_type_t ty
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== DAVEY JONES booting ===");
+    ESP_LOGI(TAG, "free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
     /* ----- hardware foundation ----- */
     bool bsp_ok      = TRY(nesso_bsp_init(),     "bsp");

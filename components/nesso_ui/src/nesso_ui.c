@@ -150,6 +150,10 @@ static bool s_cap_done = false;
 /* Deferred IR command — sent outside the LVGL lock by the refresh timer. */
 static uint8_t s_ir_pending = 0xFF;  /* 0xFF = no pending command */
 
+/* Shared canvas buffer for egg + spectrum (never used simultaneously).
+ * 240*135*2 = 64,800 bytes — saves 39 KB vs two separate buffers. */
+static lv_color_t s_shared_canvas[240 * 135];
+
 /* Beacon spam SSIDs. */
 static const char *s_spam_list[] = {
     "FBI Surveillance Van",
@@ -1352,9 +1356,9 @@ static void navigate(ui_state_t state)
         s_dyn_count = 0;
 
         /* Canvas fills the landscape screen. */
-        static lv_color_t egg_cbuf[240 * 135];
+        /* Uses file-scope s_shared_canvas. */
         lv_obj_t *canvas = lv_canvas_create(s_screen);
-        lv_canvas_set_buffer(canvas, egg_cbuf, 240, 135, LV_COLOR_FORMAT_RGB565);
+        lv_canvas_set_buffer(canvas, s_shared_canvas, 240, 135, LV_COLOR_FORMAT_RGB565);
         lv_obj_align(canvas, LV_ALIGN_CENTER, 0, 0);
         track(canvas); /* 0: canvas */
         break;
@@ -1377,10 +1381,9 @@ static void navigate(ui_state_t state)
         lv_obj_t *band_lbl = make_label(s_screen, 10, COL_GREEN, "WIDE 850-960  2xtap:band");
         track(band_lbl); /* 0: band info */
 
-        /* Canvas for waveform — 230 wide x 85 tall. */
-        static lv_color_t cbuf[230 * 85];
+        /* Canvas for waveform — reuses file-scope s_shared_canvas. */
         lv_obj_t *canvas = lv_canvas_create(s_screen);
-        lv_canvas_set_buffer(canvas, cbuf, 230, 85, LV_COLOR_FORMAT_RGB565);
+        lv_canvas_set_buffer(canvas, s_shared_canvas, 230, 85, LV_COLOR_FORMAT_RGB565);
         lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 5, 28);
         lv_canvas_fill_bg(canvas, COL_BLACK, LV_OPA_COVER);
         track(canvas); /* 1: canvas */
