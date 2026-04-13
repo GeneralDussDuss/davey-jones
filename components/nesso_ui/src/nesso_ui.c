@@ -40,6 +40,7 @@
 #include "nesso_wardrive.h"
 #include "nesso_eapol.h"
 #include "nesso_wifi.h"
+#include "nesso_portal.h"
 #include "nesso_ir.h"
 #include "nesso_subghz.h"
 #include "nesso_buzzer.h"
@@ -69,6 +70,8 @@ typedef enum {
     UI_WIFI_DEAUTH_ACTIVE,
     UI_WIFI_BEACON_SPAM,
     UI_WIFI_DAVEYGOTCHI,
+    UI_WIFI_PORTAL_MENU,
+    UI_WIFI_PORTAL_ACTIVE,
     UI_BT_MENU,
     UI_BT_SCAN,
     UI_BT_BADKB_DEVICE,
@@ -544,12 +547,23 @@ static void build_main_menu(void)
 /* WiFi Menu */
 static const menu_item_t s_wifi_items[] = {
     { "> Daveygotchi",  UI_WIFI_DAVEYGOTCHI },
+    { "> Evil Portal",  UI_WIFI_PORTAL_MENU },
     { "> Scan",         UI_WIFI_SCANNING },
     { "> AP List",      UI_WIFI_AP_LIST },
     { "> Deauth",       UI_WIFI_DEAUTH_SELECT },
     { "> Beacon Spam",  UI_WIFI_BEACON_SPAM },
 };
-#define WIFI_ITEM_COUNT 5
+#define WIFI_ITEM_COUNT 6
+
+/* Evil Portal templates as menu items. */
+static const menu_item_t s_portal_items[] = {
+    { "> Google Login",    UI_WIFI_PORTAL_ACTIVE },
+    { "> Facebook Login",  UI_WIFI_PORTAL_ACTIVE },
+    { "> Microsoft Login", UI_WIFI_PORTAL_ACTIVE },
+    { "> Free WiFi",       UI_WIFI_PORTAL_ACTIVE },
+};
+#define PORTAL_ITEM_COUNT 4
+static int s_portal_template = 0;
 
 /* WiFi AP List / Deauth Select (shared builder). */
 static void build_ap_list(const char *title, bool deauth_mode)
@@ -1010,6 +1024,7 @@ static void navigate(ui_state_t state)
     /* Save cursor position for multi-step flows. */
     if (s_state == UI_BT_BADKB_DEVICE) s_badkb_device_idx = s_cursor;
     if (s_state == UI_BT_BADKB_PAYLOAD) s_badkb_payload_idx = s_cursor;
+    if (s_state == UI_WIFI_PORTAL_MENU) s_portal_template = s_cursor;
 
     s_tvbg_done = false;
     s_bt_scan_done = false;
@@ -1038,6 +1053,40 @@ static void navigate(ui_state_t state)
         build_beacon_spam();
         break;
     case UI_WIFI_DAVEYGOTCHI: build_daveygotchi(); break;
+    case UI_WIFI_PORTAL_MENU:
+        build_menu("EVIL PORTAL", s_portal_items, PORTAL_ITEM_COUNT);
+        break;
+    case UI_WIFI_PORTAL_ACTIVE:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "EVIL PORTAL");
+        s_dyn_count = 0;
+
+        static const char *tnames[] = {"Google","Facebook","Microsoft","Free WiFi"};
+        char info[32];
+        snprintf(info, sizeof(info), "Template: %s", tnames[s_portal_template % 4]);
+        make_label(s_screen, 30, COL_CYAN, info);
+
+        lv_obj_t *st = make_label(s_screen, 55, COL_GREEN, "Starting AP...");
+        track(st); /* 0: status */
+        lv_obj_t *clients = make_label(s_screen, 78, COL_YELLOW, "Clients: 0");
+        track(clients); /* 1 */
+        lv_obj_t *creds = make_label(s_screen, 100, COL_RED, "Creds: 0");
+        track(creds); /* 2 */
+
+        lv_obj_t *h = lv_label_create(s_screen);
+        lv_label_set_text(h, "KEY2: stop portal");
+        lv_obj_set_style_text_color(h, COL_WHITE, 0);
+        lv_obj_set_style_opa(h, LV_OPA_60, 0);
+        lv_obj_align(h, LV_ALIGN_BOTTOM_MID, 0, -4);
+
+        nesso_portal_config_t pcfg = NESSO_PORTAL_CONFIG_DEFAULTS();
+        pcfg.template_id = (nesso_portal_template_t)s_portal_template;
+        nesso_portal_start(&pcfg);
+        break;
+    }
     case UI_IR_SAMSUNG_REMOTE:
     {
         s_screen = lv_obj_create(NULL);
@@ -1464,6 +1513,7 @@ static void handle_select(void)
     case UI_BT_SPAM_MENU:
     case UI_BT_BADKB_DEVICE:
     case UI_BT_BADKB_PAYLOAD:
+    case UI_WIFI_PORTAL_MENU:
     case UI_SALTY_DEEP:
     case UI_SUBGHZ_MENU:
         if (items && s_cursor < count) {
@@ -1582,6 +1632,7 @@ static const menu_item_t *current_menu_items(int *out_count)
     case UI_MAIN_MENU: *out_count = MAIN_ITEM_COUNT; return s_main_items;
     case UI_WIFI_MENU: *out_count = WIFI_ITEM_COUNT; return s_wifi_items;
     case UI_IR_MENU:     *out_count = IR_ITEM_COUNT;     return s_ir_items;
+    case UI_WIFI_PORTAL_MENU: *out_count = PORTAL_ITEM_COUNT;        return s_portal_items;
     case UI_BT_BADKB_DEVICE:  *out_count = BADKB_DEVICE_COUNT;       return s_badkb_devices;
     case UI_BT_BADKB_PAYLOAD: *out_count = BADKB_PAYLOAD_ITEM_COUNT; return s_badkb_payload_items;
     case UI_SALTY_DEEP:       *out_count = SALTY_ITEM_COUNT;          return s_salty_items;
@@ -1759,6 +1810,17 @@ static void refresh_cb(lv_timer_t *t)
 #endif
         break;
     }
+    case UI_WIFI_PORTAL_ACTIVE:
+        if (s_dyn_count >= 3 && nesso_portal_is_active()) {
+            static bool pb = false; pb = !pb;
+            lv_label_set_text_fmt(s_dyn_labels[0], "AP Active %s", pb ? ">>>" : "   ");
+            lv_obj_set_style_text_color(s_dyn_labels[0], COL_GREEN, 0);
+            lv_label_set_text_fmt(s_dyn_labels[1], "Clients: %u", nesso_portal_client_count());
+            uint32_t cc = nesso_portal_cred_count();
+            lv_label_set_text_fmt(s_dyn_labels[2], "Creds: %lu", (unsigned long)cc);
+            lv_obj_set_style_text_color(s_dyn_labels[2], cc > 0 ? COL_RED : COL_YELLOW, 0);
+        }
+        break;
     case UI_BT_BADKB_ACTIVE:
         if (s_dyn_count >= 1) {
             if (nesso_ble_hid_is_connected()) {
@@ -2023,6 +2085,7 @@ static void button_task(void *arg)
             case UI_BT_SPAM_MENU:
             case UI_BT_BADKB_DEVICE:
             case UI_BT_BADKB_PAYLOAD:
+            case UI_WIFI_PORTAL_MENU:
             case UI_SALTY_DEEP:
             case UI_SUBGHZ_MENU:
             {
@@ -2084,6 +2147,13 @@ static void button_task(void *arg)
             case UI_WIFI_BEACON_SPAM:
                 nesso_wifi_beacon_spam_stop();
                 navigate(UI_WIFI_MENU);
+                break;
+            case UI_WIFI_PORTAL_MENU:
+                navigate(UI_WIFI_MENU);
+                break;
+            case UI_WIFI_PORTAL_ACTIVE:
+                nesso_portal_stop();
+                navigate(UI_WIFI_PORTAL_MENU);
                 break;
             case UI_WIFI_DAVEYGOTCHI:
                 if (s_deauth_active) stop_deauth();

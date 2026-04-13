@@ -12,6 +12,7 @@ idf_component_register(
         nesso_subghz
         nesso_buzzer
         nesso_ble
+        nesso_portal
         esp_lcd
         esp_driver_i2c
     PRIV_REQUIRES
