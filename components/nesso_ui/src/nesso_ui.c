@@ -2203,16 +2203,18 @@ static void refresh_cb(lv_timer_t *t)
                 off += snprintf(buf, sizeof(buf), "%zu found:\n", result.count);
                 for (size_t i = 0; i < result.count && i < 7; ++i) {
                     const nesso_ble_device_t *d = &result.devices[i];
-                    /* Tight format: "Name    -55" — fits 19 chars per line. */
                     const char *name = d->name[0] ? d->name : d->type;
+                    /* Ultra tight: 8 char name + rssi */
                     off += snprintf(buf + off, sizeof(buf) - off,
-                        "%-12.12s %d\n", name, d->rssi);
+                        "%.8s %d\n", name, d->rssi);
                 }
                 if (result.count > 7)
                     snprintf(buf + off, sizeof(buf) - off, "+%zu more", result.count - 7);
                 if (result.count == 0)
                     snprintf(buf, sizeof(buf), "No devices found");
                 lv_label_set_text(s_dyn_labels[0], buf);
+                lv_obj_set_width(s_dyn_labels[0], 130);
+                lv_label_set_long_mode(s_dyn_labels[0], LV_LABEL_LONG_CLIP);
                 lv_obj_set_style_text_color(s_dyn_labels[0],
                     result.count > 0 ? COL_CYAN : COL_RED, 0);
             }
