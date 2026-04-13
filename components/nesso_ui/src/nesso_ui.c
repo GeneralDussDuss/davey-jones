@@ -1098,7 +1098,7 @@ static void navigate(ui_state_t state)
 
         /* Landscape: 240 wide x 135 tall.
          * Push content down 10px to avoid rotation clipping at top. */
-        lv_obj_t *band_lbl = make_label(s_screen, 10, COL_GREEN, "WIDE 400-930  2xtap:band");
+        lv_obj_t *band_lbl = make_label(s_screen, 10, COL_GREEN, "WIDE 850-960  2xtap:band");
         track(band_lbl); /* 0: band info */
 
         /* Canvas for waveform — 230 wide x 85 tall. */
@@ -1124,7 +1124,7 @@ static void navigate(ui_state_t state)
         s_dyn_count = 0;
 
         make_label(s_screen, 4, COL_MAGENTA, "CAPTURE");
-        lv_obj_t *st = make_label(s_screen, 30, COL_YELLOW, "Listening at 433.92 MHz...");
+        lv_obj_t *st = make_label(s_screen, 30, COL_YELLOW, "Listening at 915 MHz...");
         track(st); /* 0 */
         lv_obj_t *cnt = make_label(s_screen, 55, COL_CYAN, "0 bytes");
         track(cnt); /* 1 */
@@ -1488,7 +1488,7 @@ static void refresh_cb(lv_timer_t *t)
         if (s_dyn_count < 3) break;
         nesso_subghz_sweep(s_subghz_band, &s_spectrum);
 
-        static const char *band_names[] = { "WIDE 400-930", "433 MHz", "868 MHz", "915 MHz" };
+        static const char *band_names[] = { "WIDE 850-960", "868 MHz", "915 MHz" };
         lv_label_set_text_fmt(s_dyn_labels[0], "%s  2xtap:band",
                               band_names[s_subghz_band % SUBGHZ_BAND_COUNT]);
 
@@ -1538,7 +1538,7 @@ static void refresh_cb(lv_timer_t *t)
         static bool s_cap_done = false;
         if (!s_cap_done) {
             s_cap_done = true;
-            esp_err_t err = nesso_subghz_capture(433920000, 5000, -70, &s_capture);
+            esp_err_t err = nesso_subghz_capture(915000000, 5000, -70, &s_capture);
             if (err == ESP_OK) {
                 s_has_capture = true;
                 if (s_dyn_count >= 2) {

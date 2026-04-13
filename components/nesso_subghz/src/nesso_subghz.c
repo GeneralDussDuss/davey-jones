@@ -31,9 +31,10 @@ extern const void *nesso_sx1262_get_hal_ctx(void);
 
 static const char *TAG = "subghz";
 
-/* Band definitions — index matches subghz_band_t. */
-static const uint32_t s_band_start[] = { 400000000, 430000000, 860000000, 900000000 };
-static const uint32_t s_band_end[]   = { 930000000, 440000000, 870000000, 928000000 };
+/* Band definitions — index matches subghz_band_t.
+ * Nesso N1 SX1262 module: 850-960 MHz ONLY. */
+static const uint32_t s_band_start[] = { 850000000, 860000000, 902000000 };
+static const uint32_t s_band_end[]   = { 960000000, 870000000, 928000000 };
 
 /* -------------------- spectrum analyzer -------------------- */
 

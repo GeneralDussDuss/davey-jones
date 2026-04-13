@@ -20,11 +20,12 @@ extern "C" {
 /* -------------------- spectrum analyzer -------------------- */
 
 typedef enum {
-    SUBGHZ_BAND_WIDE = 0, /* 400-930 MHz — full SX1262 range, catch anything */
-    SUBGHZ_BAND_433,       /* 430-440 MHz — ISM EU/Asia, garage doors, remotes */
+    SUBGHZ_BAND_WIDE = 0, /* 850-960 MHz — full Nesso SX1262 range */
     SUBGHZ_BAND_868,       /* 860-870 MHz — ISM EU, LoRaWAN EU */
-    SUBGHZ_BAND_915,       /* 900-928 MHz — ISM Americas, LoRaWAN US */
+    SUBGHZ_BAND_915,       /* 902-928 MHz — ISM Americas, LoRaWAN US */
     SUBGHZ_BAND_COUNT,
+    /* NOTE: Nesso N1 SX1262 module is 850-960 MHz ONLY.
+     * 433 MHz is NOT supported by this hardware. */
 } subghz_band_t;
 
 #define SUBGHZ_SPECTRUM_POINTS 240  /* landscape LCD width */
