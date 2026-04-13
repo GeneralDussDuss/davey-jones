@@ -854,11 +854,17 @@ static void build_daveygotchi(void)
     lv_obj_set_style_text_color(hint, COL_WHITE, 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
 
+    /* Clean slate — stop any leftover deauth/BLE from previous screens. */
+    if (s_deauth_active) stop_deauth();
+    if (nesso_ble_spam_is_active()) nesso_ble_spam_stop();
+
     /* Init autonomous state. */
     s_davey_mood = MOOD_LURKING;
     s_davey_start_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
-    s_davey_next_hunt = s_davey_start_ms + 5000;  /* first hunt after 5s */
+    s_davey_next_hunt = s_davey_start_ms + 3000;  /* first hunt after 3s (was 5) */
     s_davey_target_idx = -1;
+    s_davey_hunt_until = 0;
+    s_davey_feast_until = 0;
 
     nesso_eapol_status_t es = {0};
     nesso_eapol_status(&es);
