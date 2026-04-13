@@ -102,6 +102,37 @@ uint32_t nesso_ble_sniff_count(void);
 esp_err_t nesso_ble_beacon_start(const uint8_t uuid[16], uint16_t major, uint16_t minor);
 esp_err_t nesso_ble_beacon_stop(void);
 
+/* -------------------- toy control (The Salty Deep) -------------------- */
+
+#define BLE_TOY_MAX 8
+
+typedef struct {
+    uint8_t addr[6];
+    char    name[20];
+    char    brand[12];   /* "Lovense", "WeVibe", etc. */
+    int8_t  rssi;
+    uint8_t addr_type;
+} nesso_ble_toy_t;
+
+typedef struct {
+    nesso_ble_toy_t toys[BLE_TOY_MAX];
+    size_t count;
+} nesso_ble_toy_scan_t;
+
+/** Scan for known BLE toy devices. */
+esp_err_t nesso_ble_toy_scan(uint32_t duration_sec, nesso_ble_toy_scan_t *out);
+
+/** Connect to a toy and control it. */
+esp_err_t nesso_ble_toy_connect(const nesso_ble_toy_t *toy);
+esp_err_t nesso_ble_toy_disconnect(void);
+bool nesso_ble_toy_is_connected(void);
+
+/** Set vibration intensity (0-20). */
+esp_err_t nesso_ble_toy_vibrate(uint8_t intensity);
+
+/** Stop all motors. */
+esp_err_t nesso_ble_toy_stop(void);
+
 #ifdef __cplusplus
 }
 #endif

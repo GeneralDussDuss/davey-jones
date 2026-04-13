@@ -80,6 +80,9 @@ typedef enum {
     UI_BT_SPAM_GOOGLE,
     UI_BT_SPAM_WINDOWS,
     UI_BT_SPAM_ALL,
+    UI_SALTY_DEEP,
+    UI_SALTY_SCAN,
+    UI_SALTY_CONTROL,
     UI_EASTER_EGG,
     UI_SUBGHZ_MENU,
     UI_SUBGHZ_ANALYZER,
@@ -134,6 +137,7 @@ static bool s_nav_back = false;
 /* One-shot flags for blocking screens. */
 static bool s_tvbg_done = false;
 static bool s_bt_scan_done = false;
+static bool s_salty_scanned = false;
 
 /* Beacon spam SSIDs. */
 static const char *s_spam_list[] = {
@@ -381,9 +385,19 @@ static const menu_item_t s_main_items[] = {
     { "> Bluetooth", UI_BT_MENU },
     { "> Sub-GHz",   UI_SUBGHZ_MENU },
     { "> IR",        UI_IR_MENU },
-    { "> The Locker", UI_EASTER_EGG },
+    { "> Salty Deep",  UI_SALTY_DEEP },
+    { "> The Locker",  UI_EASTER_EGG },
 };
-#define MAIN_ITEM_COUNT 5
+#define MAIN_ITEM_COUNT 6
+
+/* Salty Deep */
+static const menu_item_t s_salty_items[] = {
+    { "> Scan for Toys", UI_SALTY_SCAN },
+};
+#define SALTY_ITEM_COUNT 1
+
+static nesso_ble_toy_scan_t s_toy_scan = {0};
+static int s_toy_intensity = 0;
 
 /* Bluetooth Menu */
 static const menu_item_t s_bt_items[] = {
@@ -907,6 +921,7 @@ static void navigate(ui_state_t state)
 {
     s_tvbg_done = false;
     s_bt_scan_done = false;
+    s_salty_scanned = false;
 
     /* Reset landscape rotation if leaving analyzer or easter egg. */
     if ((s_state == UI_SUBGHZ_ANALYZER || s_state == UI_EASTER_EGG) &&
@@ -1091,6 +1106,39 @@ static void navigate(ui_state_t state)
         nesso_ble_spam_start(t);
         break;
     }
+    case UI_SALTY_DEEP:
+        build_menu("THE SALTY DEEP", s_salty_items, SALTY_ITEM_COUNT);
+        break;
+    case UI_SALTY_SCAN:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "SCANNING...");
+        s_dyn_count = 0;
+        lv_obj_t *st = make_label(s_screen, 30, COL_MAGENTA, "Looking for devices...");
+        track(st);
+        break;
+    }
+    case UI_SALTY_CONTROL:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "CONTROL");
+        s_dyn_count = 0;
+        make_label(s_screen, 30, COL_CYAN, "Connected");
+        lv_obj_t *bar = make_label(s_screen, 60, COL_MAGENTA, "....................  0");
+        track(bar); /* 0: intensity bar */
+        make_label(s_screen, 95, COL_WHITE, "btn: intensity up");
+        make_label(s_screen, 115, COL_WHITE, "2xtap: on/off");
+        lv_obj_t *h = lv_label_create(s_screen);
+        lv_label_set_text(h, "KEY2: disconnect");
+        lv_obj_set_style_text_color(h, COL_WHITE, 0);
+        lv_obj_set_style_opa(h, LV_OPA_60, 0);
+        lv_obj_align(h, LV_ALIGN_BOTTOM_MID, 0, -4);
+        break;
+    }
     case UI_EASTER_EGG:
     {
         lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_90);
@@ -1259,10 +1307,35 @@ static void handle_select(void)
     case UI_IR_MENU:
     case UI_BT_MENU:
     case UI_BT_SPAM_MENU:
+    case UI_SALTY_DEEP:
     case UI_SUBGHZ_MENU:
         if (items && s_cursor < count) {
             s_has_pending = true;
             s_pending_nav = items[s_cursor].target;
+        }
+        break;
+
+    case UI_SALTY_SCAN:
+        /* Double-tap on scan results = connect to highlighted toy. */
+        if (s_toy_scan.count > 0 && s_cursor < (int)s_toy_scan.count) {
+            if (!nesso_ble_is_ready()) nesso_ble_init();
+            nesso_ble_toy_connect(&s_toy_scan.toys[s_cursor]);
+            s_toy_intensity = 0;
+            s_has_pending = true;
+            s_pending_nav = UI_SALTY_CONTROL;
+        }
+        break;
+
+    case UI_SALTY_CONTROL:
+        /* Double-tap on control = toggle between 0 and last intensity. */
+        if (nesso_ble_toy_is_connected()) {
+            if (s_toy_intensity > 0) {
+                nesso_ble_toy_stop();
+                s_toy_intensity = 0;
+            } else {
+                s_toy_intensity = 10;
+                nesso_ble_toy_vibrate(10);
+            }
         }
         break;
 
@@ -1344,6 +1417,7 @@ static const menu_item_t *current_menu_items(int *out_count)
     case UI_MAIN_MENU: *out_count = MAIN_ITEM_COUNT; return s_main_items;
     case UI_WIFI_MENU: *out_count = WIFI_ITEM_COUNT; return s_wifi_items;
     case UI_IR_MENU:     *out_count = IR_ITEM_COUNT;     return s_ir_items;
+    case UI_SALTY_DEEP:    *out_count = SALTY_ITEM_COUNT;    return s_salty_items;
     case UI_BT_MENU:      *out_count = BT_ITEM_COUNT;      return s_bt_items;
     case UI_BT_SPAM_MENU: *out_count = BT_SPAM_ITEM_COUNT; return s_bt_spam_items;
     case UI_SUBGHZ_MENU: *out_count = SUBGHZ_ITEM_COUNT; return s_subghz_items;
@@ -1429,6 +1503,54 @@ static void refresh_cb(lv_timer_t *t)
                                         blink ? COL_RED : COL_YELLOW, 0);
         }
         nesso_led(s_tvbg_rounds % 2 == 0);
+        break;
+    }
+    case UI_SALTY_SCAN:
+    {
+        if (!s_salty_scanned) {
+            s_salty_scanned = true;
+            if (!nesso_ble_is_ready()) nesso_ble_init();
+            nesso_ble_toy_scan(5, &s_toy_scan);
+            if (s_dyn_count >= 1) {
+                if (s_toy_scan.count > 0) {
+                    char buf[200] = "";
+                    int off = snprintf(buf, sizeof(buf), "%zu device(s):\n", s_toy_scan.count);
+                    for (size_t i = 0; i < s_toy_scan.count && i < 6; ++i) {
+                        off += snprintf(buf + off, sizeof(buf) - off,
+                            "%s%-7s %s %d\n",
+                            i == (size_t)s_cursor ? ">" : " ",
+                            s_toy_scan.toys[i].brand,
+                            s_toy_scan.toys[i].name,
+                            s_toy_scan.toys[i].rssi);
+                    }
+                    lv_label_set_text(s_dyn_labels[0], buf);
+                    lv_obj_set_style_text_color(s_dyn_labels[0], COL_MAGENTA, 0);
+                } else {
+                    lv_label_set_text(s_dyn_labels[0], "No toys found nearby\n\nMake sure device\nis in pairing mode");
+                    lv_obj_set_style_text_color(s_dyn_labels[0], COL_YELLOW, 0);
+                }
+            }
+        }
+        break;
+    }
+    case UI_SALTY_CONTROL:
+    {
+        /* Update intensity bar. */
+        if (s_dyn_count >= 1) {
+            char bar[30];
+            int filled = s_toy_intensity;
+            int empty  = 20 - filled;
+            int off = 0;
+            for (int i = 0; i < filled; ++i) bar[off++] = '|';
+            for (int i = 0; i < empty; ++i)  bar[off++] = '.';
+            snprintf(bar + off, sizeof(bar) - off, " %d", s_toy_intensity);
+            lv_label_set_text(s_dyn_labels[0], bar);
+
+            lv_color_t col = s_toy_intensity == 0 ? COL_WHITE :
+                             s_toy_intensity < 8  ? COL_CYAN :
+                             s_toy_intensity < 15 ? COL_YELLOW : COL_RED;
+            lv_obj_set_style_text_color(s_dyn_labels[0], col, 0);
+        }
         break;
     }
     case UI_EASTER_EGG:
@@ -1698,6 +1820,7 @@ static void button_task(void *arg)
             case UI_IR_MENU:
             case UI_BT_MENU:
             case UI_BT_SPAM_MENU:
+            case UI_SALTY_DEEP:
             case UI_SUBGHZ_MENU:
             {
                 int count = 0;
@@ -1717,6 +1840,18 @@ static void button_task(void *arg)
                 refresh_ap_rows(true);
                 break;
             case UI_WIFI_DEAUTH_ACTIVE:
+                break;
+            case UI_SALTY_SCAN:
+                if (s_toy_scan.count > 0) {
+                    s_cursor = (s_cursor + 1) % (int)s_toy_scan.count;
+                }
+                break;
+            case UI_SALTY_CONTROL:
+                /* KEY1 = increase intensity. */
+                if (nesso_ble_toy_is_connected()) {
+                    s_toy_intensity = (s_toy_intensity + 2) % 22; /* 0,2,4,...,20,0 */
+                    nesso_ble_toy_vibrate((uint8_t)s_toy_intensity);
+                }
                 break;
             case UI_IR_SAMSUNG_REMOTE:
             {
@@ -1749,6 +1884,17 @@ static void button_task(void *arg)
             case UI_WIFI_DAVEYGOTCHI:
                 if (s_deauth_active) stop_deauth();
                 navigate(UI_WIFI_MENU);
+                break;
+            case UI_SALTY_DEEP:
+                navigate(UI_MAIN_MENU);
+                break;
+            case UI_SALTY_SCAN:
+                navigate(UI_SALTY_DEEP);
+                break;
+            case UI_SALTY_CONTROL:
+                nesso_ble_toy_stop();
+                nesso_ble_toy_disconnect();
+                navigate(UI_SALTY_DEEP);
                 break;
             case UI_EASTER_EGG:
                 navigate(UI_MAIN_MENU);

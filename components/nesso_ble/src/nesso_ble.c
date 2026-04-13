@@ -711,3 +711,209 @@ esp_err_t nesso_ble_beacon_stop(void)
     s_beacon_running = false;
     return ESP_OK;
 }
+
+/* ==================== THE SALTY DEEP — TOY CONTROL ==================== */
+
+static nesso_ble_toy_scan_t *s_toy_scan_out = NULL;
+static SemaphoreHandle_t s_toy_scan_done = NULL;
+static uint16_t s_toy_conn_handle = 0;
+static bool s_toy_connected = false;
+static uint16_t s_toy_tx_handle = 0;  /* GATT write characteristic handle */
+
+/* Known device name prefixes for toy detection. */
+static const struct { const char *prefix; const char *brand; } s_toy_prefixes[] = {
+    { "LVS-",      "Lovense" },
+    { "Lovense",    "Lovense" },
+    { "Edge",       "Lovense" },
+    { "Hush",       "Lovense" },
+    { "Lush",       "Lovense" },
+    { "Domi",       "Lovense" },
+    { "Nora",       "Lovense" },
+    { "Max",        "Lovense" },
+    { "Osci",       "Lovense" },
+    { "Satisfyer",  "Satisfyer" },
+    { "SF ",        "Satisfyer" },
+    { "WeVibe",     "WeVibe" },
+    { "WV",         "WeVibe" },
+    { "Kiiroo",     "Kiiroo" },
+    { "Pearl",      "Kiiroo" },
+    { "OhMiBod",    "OhMiBod" },
+    { "Vibease",    "Vibease" },
+    { "Magic",      "MagicMotion" },
+};
+#define TOY_PREFIX_COUNT (sizeof(s_toy_prefixes) / sizeof(s_toy_prefixes[0]))
+
+static const char *match_toy(const char *name)
+{
+    if (!name || !name[0]) return NULL;
+    for (size_t i = 0; i < TOY_PREFIX_COUNT; ++i) {
+        if (strncmp(name, s_toy_prefixes[i].prefix,
+                    strlen(s_toy_prefixes[i].prefix)) == 0) {
+            return s_toy_prefixes[i].brand;
+        }
+    }
+    return NULL;
+}
+
+static int toy_scan_cb(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    if (event->type == BLE_GAP_EVENT_DISC) {
+        const struct ble_gap_disc_desc *desc = &event->disc;
+        if (!s_toy_scan_out) return 0;
+
+        /* Extract name. */
+        char name[20] = "";
+        struct ble_hs_adv_fields fields;
+        if (ble_hs_adv_parse_fields(&fields, desc->data, desc->length_data) == 0) {
+            if (fields.name && fields.name_len > 0) {
+                size_t n = fields.name_len < 19 ? fields.name_len : 19;
+                memcpy(name, fields.name, n);
+                name[n] = '\0';
+            }
+        }
+
+        const char *brand = match_toy(name);
+        if (!brand) return 0;
+
+        /* Dedup. */
+        for (size_t i = 0; i < s_toy_scan_out->count; ++i)
+            if (memcmp(s_toy_scan_out->toys[i].addr, desc->addr.val, 6) == 0) return 0;
+
+        if (s_toy_scan_out->count >= BLE_TOY_MAX) return 0;
+
+        nesso_ble_toy_t *t = &s_toy_scan_out->toys[s_toy_scan_out->count++];
+        memcpy(t->addr, desc->addr.val, 6);
+        strncpy(t->name, name, sizeof(t->name) - 1);
+        strncpy(t->brand, brand, sizeof(t->brand) - 1);
+        t->rssi = desc->rssi;
+        t->addr_type = desc->addr.type;
+
+        ESP_LOGI(TAG, "toy found: %s (%s) rssi=%d", name, brand, desc->rssi);
+
+    } else if (event->type == BLE_GAP_EVENT_DISC_COMPLETE) {
+        if (s_toy_scan_done) xSemaphoreGive(s_toy_scan_done);
+    }
+    return 0;
+}
+
+esp_err_t nesso_ble_toy_scan(uint32_t duration_sec, nesso_ble_toy_scan_t *out)
+{
+    if (!s_initted) return ESP_ERR_INVALID_STATE;
+    if (!out) return ESP_ERR_INVALID_ARG;
+    if (s_spam_running) nesso_ble_spam_stop();
+
+    memset(out, 0, sizeof(*out));
+    s_toy_scan_out = out;
+    if (!s_toy_scan_done) s_toy_scan_done = xSemaphoreCreateBinary();
+
+    struct ble_gap_disc_params params = {
+        .itvl = 0, .window = 0,
+        .filter_policy = BLE_HCI_SCAN_FILT_NO_WL,
+        .limited = 0, .passive = 0,  /* active scan to get names */
+        .filter_duplicates = 0,
+    };
+    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, duration_sec * 1000,
+                          &params, toy_scan_cb, NULL);
+    if (rc != 0) { s_toy_scan_out = NULL; return ESP_FAIL; }
+
+    xSemaphoreTake(s_toy_scan_done, pdMS_TO_TICKS(duration_sec * 1000 + 2000));
+    s_toy_scan_out = NULL;
+
+    ESP_LOGI(TAG, "toy scan: %zu found", out->count);
+    return ESP_OK;
+}
+
+/* GATT connection + service discovery for toy control. */
+
+static int toy_gap_cb(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            s_toy_conn_handle = event->connect.conn_handle;
+            s_toy_connected = true;
+            ESP_LOGI(TAG, "toy connected: handle=%u", s_toy_conn_handle);
+            /* Discover services to find TX characteristic.
+             * For Lovense, the TX char is typically the first writable
+             * characteristic on the primary service. We'll write commands
+             * as raw bytes to whatever we find. */
+        } else {
+            ESP_LOGW(TAG, "toy connect failed: %d", event->connect.status);
+            s_toy_connected = false;
+        }
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        s_toy_connected = false;
+        ESP_LOGI(TAG, "toy disconnected");
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+esp_err_t nesso_ble_toy_connect(const nesso_ble_toy_t *toy)
+{
+    if (!s_initted || !toy) return ESP_ERR_INVALID_ARG;
+    if (s_toy_connected) nesso_ble_toy_disconnect();
+
+    ble_addr_t addr;
+    addr.type = toy->addr_type;
+    memcpy(addr.val, toy->addr, 6);
+
+    int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &addr, 5000, NULL, toy_gap_cb, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_connect: %d", rc);
+        return ESP_FAIL;
+    }
+
+    /* Wait for connection. */
+    for (int i = 0; i < 50 && !s_toy_connected; ++i)
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+    if (!s_toy_connected) return ESP_ERR_TIMEOUT;
+
+    /* For Lovense: the TX characteristic handle is typically 0x0016 or
+     * discovered via service discovery. We'll try the known handle first,
+     * falling back to writing to handle 0x000e which works for many models. */
+    s_toy_tx_handle = 0x0016;
+
+    return ESP_OK;
+}
+
+esp_err_t nesso_ble_toy_disconnect(void)
+{
+    if (!s_toy_connected) return ESP_OK;
+    ble_gap_terminate(s_toy_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    s_toy_connected = false;
+    return ESP_OK;
+}
+
+bool nesso_ble_toy_is_connected(void) { return s_toy_connected; }
+
+esp_err_t nesso_ble_toy_vibrate(uint8_t intensity)
+{
+    if (!s_toy_connected) return ESP_ERR_INVALID_STATE;
+    if (intensity > 20) intensity = 20;
+
+    /* Lovense command format: "Vibrate:N;" where N is 0-20. */
+    char cmd[16];
+    snprintf(cmd, sizeof(cmd), "Vibrate:%u;", intensity);
+
+    int rc = ble_gattc_write_flat(s_toy_conn_handle, s_toy_tx_handle,
+                                  cmd, strlen(cmd), NULL, NULL);
+    if (rc != 0) {
+        /* Try alternate handle. */
+        s_toy_tx_handle = 0x000e;
+        rc = ble_gattc_write_flat(s_toy_conn_handle, s_toy_tx_handle,
+                                  cmd, strlen(cmd), NULL, NULL);
+    }
+    return rc == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t nesso_ble_toy_stop(void)
+{
+    return nesso_ble_toy_vibrate(0);
+}
