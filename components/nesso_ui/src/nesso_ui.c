@@ -154,6 +154,7 @@ static bool s_salty_scanned = false;
 static bool s_cap_done = false;
 static bool s_wifi_scan_started = false;
 
+
 static void wifi_scan_task(void *arg)
 {
     (void)arg;
@@ -163,6 +164,8 @@ static void wifi_scan_task(void *arg)
     s_wifi_scan_started = false;
     vTaskDelete(NULL);
 }
+
+/* subghz_capture_task is defined after s_capture/s_has_capture declaration. */
 
 /* Deferred IR command — sent outside the LVGL lock by the refresh timer. */
 static uint8_t s_ir_pending = 0xFF;  /* 0xFF = no pending command */
@@ -581,6 +584,18 @@ static subghz_band_t     s_subghz_band = SUBGHZ_BAND_WIDE;
 static subghz_spectrum_t s_spectrum = {0};
 static subghz_capture_t  s_capture  = {0};
 static bool              s_has_capture = false;
+
+static void subghz_capture_task(void *arg)
+{
+    (void)arg;
+    esp_err_t err = nesso_subghz_capture(915000000, 5000, -70, &s_capture);
+    if (err == ESP_OK) {
+        s_has_capture = true;
+        nesso_subghz_save(&s_capture, "/storage/capture.bin");
+        nesso_buzzer_tone(3000, 200);
+    }
+    vTaskDelete(NULL);
+}
 
 /* IR Menu */
 static const menu_item_t s_ir_items[] = {
@@ -1866,9 +1881,8 @@ static void refresh_cb(lv_timer_t *t)
         s_ir_pending = 0xFF;
         if (!nesso_ir_is_ready()) nesso_ir_init();
         nesso_ir_send_samsung(0x0707, cmd);
-        nesso_led(true);
-        vTaskDelay(pdMS_TO_TICKS(30));
-        nesso_led(false);
+        /* LED flash handled by rmt_tx_wait inside send — no vTaskDelay here. */
+        nesso_led(true);  /* will be turned off on next refresh tick */
     }
 
     /* WiFi scanning: run in background task to avoid blocking LVGL. */
@@ -2183,24 +2197,16 @@ static void refresh_cb(lv_timer_t *t)
     }
     case UI_SUBGHZ_CAPTURE:
     {
+        /* Run capture in background task to avoid blocking LVGL. */
         if (!s_cap_done) {
             s_cap_done = true;
-            esp_err_t err = nesso_subghz_capture(915000000, 5000, -70, &s_capture);
-            if (err == ESP_OK) {
-                s_has_capture = true;
-                if (s_dyn_count >= 2) {
-                    lv_label_set_text(s_dyn_labels[0], "Signal captured!");
-                    lv_label_set_text_fmt(s_dyn_labels[1], "%zu bytes", s_capture.length);
-                    lv_obj_set_style_text_color(s_dyn_labels[0], COL_GREEN, 0);
-                }
-                nesso_subghz_save(&s_capture, "/storage/capture.bin");
-                nesso_buzzer_tone(3000, 200);
-            } else {
-                if (s_dyn_count >= 2) {
-                    lv_label_set_text(s_dyn_labels[0], "No signal detected");
-                    lv_obj_set_style_text_color(s_dyn_labels[0], COL_RED, 0);
-                }
-            }
+            xTaskCreate(subghz_capture_task, "subghz_cap", 4096, NULL, 5, NULL);
+        }
+        /* Check if capture completed (task sets s_has_capture). */
+        if (s_has_capture && s_dyn_count >= 2) {
+            lv_label_set_text(s_dyn_labels[0], "Signal captured!");
+            lv_label_set_text_fmt(s_dyn_labels[1], "%zu bytes", s_capture.length);
+            lv_obj_set_style_text_color(s_dyn_labels[0], COL_GREEN, 0);
         }
         break;
     }

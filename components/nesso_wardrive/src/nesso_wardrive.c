@@ -393,10 +393,15 @@ esp_err_t nesso_wardrive_start(const nesso_wardrive_config_t *cfg)
     if (ok != pdPASS) goto fail;
 
     ok = xTaskCreate(log_task, "wdr_log", 4096, path_owned, 4, &s_log_task);
-    if (ok != pdPASS) goto fail;
-
-    ESP_LOGI(TAG, "wardrive running: dwell=%ums cap=%zu path=%s",
-             (unsigned)s_cfg.dwell_ms, s_ap_capacity, path_owned);
+    if (ok != pdPASS) {
+        /* hop_task is running — tell it to stop. */
+        s_running = false;
+        for (int i = 0; i < 20 && s_hop_task; ++i) vTaskDelay(pdMS_TO_TICKS(50));
+        goto fail;
+    }
+    ESP_LOGI(TAG, "wardrive running: dwell=%ums cap=%zu",
+             (unsigned)s_cfg.dwell_ms, s_ap_capacity);
+    path_owned = NULL;  /* ownership transferred to log_task — don't free in fail */
     return ESP_OK;
 
 fail:

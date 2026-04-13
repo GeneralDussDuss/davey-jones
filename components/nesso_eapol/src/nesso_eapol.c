@@ -499,11 +499,8 @@ esp_err_t nesso_eapol_stop(void)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    /* Step 5: teardown. Take the lock briefly to fence against the last
-     * possible in-flight callback that might have raced past the drain. */
-    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_lock) xSemaphoreGive(s_lock);
-
+    /* Step 5: teardown. The 20ms drain + subscriber removal + 2s logger
+     * wait means no callbacks are in flight. Safe to tear down. */
     eapol_cleanup();
     return ESP_OK;
 }

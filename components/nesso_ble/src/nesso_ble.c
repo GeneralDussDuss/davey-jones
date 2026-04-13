@@ -100,8 +100,8 @@ static int find_device(const nesso_ble_scan_result_t *r, const uint8_t *addr)
 static const char *guess_type(const uint8_t *data, uint8_t len)
 {
     /* Look for Apple manufacturer data (0x4C00). */
-    for (int i = 0; i + 4 < len; ++i) {
-        if (data[i] == 0xFF && i + 1 < len) {
+    for (int i = 1; i + 4 < len; ++i) {  /* start at 1 to safely read data[i-1] */
+        if (data[i] == 0xFF) {
             uint8_t mfr_len = data[i - 1];
             if (i >= 1 && data[i + 1] == 0x4C && data[i + 2] == 0x00) {
                 if (mfr_len > 4 && data[i + 3] == 0x07) return "AirPod";

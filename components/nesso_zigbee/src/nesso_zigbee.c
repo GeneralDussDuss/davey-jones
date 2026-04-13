@@ -143,16 +143,13 @@ static void process_packet(const uint8_t *frame, uint8_t len, int8_t rssi, uint8
         }
     }
 
-    uint32_t pkt_num = s_scan.packets_seen;  /* capture before releasing lock */
     xSemaphoreGive(s_lock);
 
-    /* Log raw frame. */
-    if (s_log_file) {
-        fprintf(s_log_file, "%lu,%u,%d,", (unsigned long)pkt_num, channel, rssi);
-        for (int i = 0; i < len; ++i) fprintf(s_log_file, "%02x", frame[i]);
-        fprintf(s_log_file, "\n");
-        if (s_log_count++ % 20 == 0) fflush(s_log_file);
-    }
+    /* Don't do file I/O from the radio callback — it's ISR-adjacent.
+     * Just increment the counter; actual logging would need a queue
+     * pattern like wardrive/eapol. For now, packet count is accurate
+     * and the logger is a known limitation. */
+    if (s_log_file) s_log_count++;
 }
 
 /* ESP-IDF 802.15.4 receive callback. */
