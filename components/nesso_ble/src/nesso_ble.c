@@ -718,6 +718,7 @@ esp_err_t nesso_ble_beacon_stop(void)
 static bool s_hid_running = false;
 static bool s_hid_connected = false;
 static int s_last_disguise = 0;
+int s_hid_disguise_idx = 0;  /* non-static — UI sets this before hid_start */
 static uint16_t s_hid_conn = 0;
 static uint16_t s_hid_report_handle = 0;
 
@@ -823,7 +824,7 @@ esp_err_t nesso_ble_hid_start(void)
     };
     #define HID_DISGUISE_COUNT (sizeof(s_hid_disguises) / sizeof(s_hid_disguises[0]))
 
-    static int s_hid_disguise_idx = 0;
+    /* s_hid_disguise_idx set by caller before this function. */
     const char *dev_name = s_hid_disguises[s_hid_disguise_idx % HID_DISGUISE_COUNT].name;
     const uint8_t *mac_oui = s_hid_disguises[s_hid_disguise_idx % HID_DISGUISE_COUNT].mac_prefix;
 

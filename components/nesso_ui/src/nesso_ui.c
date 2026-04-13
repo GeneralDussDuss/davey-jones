@@ -71,7 +71,9 @@ typedef enum {
     UI_WIFI_DAVEYGOTCHI,
     UI_BT_MENU,
     UI_BT_SCAN,
-    UI_BT_BADKB,
+    UI_BT_BADKB_DEVICE,
+    UI_BT_BADKB_PAYLOAD,
+    UI_BT_BADKB_ACTIVE,
     UI_BT_FLOOD,
     UI_BT_TRACKER,
     UI_BT_SNIFF,
@@ -407,7 +409,7 @@ static int s_toy_intensity = 0;
 /* Bluetooth Menu */
 static const menu_item_t s_bt_items[] = {
     { "> BLE Scan",       UI_BT_SCAN },
-    { "> Bad-KB",         UI_BT_BADKB },
+    { "> Bad-KB",         UI_BT_BADKB_DEVICE },
     { "> BLE Flood",      UI_BT_FLOOD },
     { "> Tracker Detect", UI_BT_TRACKER },
     { "> BLE Sniffer",    UI_BT_SNIFF },
@@ -415,6 +417,42 @@ static const menu_item_t s_bt_items[] = {
     { "> BLE Spam",       UI_BT_SPAM_MENU },
 };
 #define BT_ITEM_COUNT 7
+
+/* Bad-KB device disguises as menu items. */
+static const menu_item_t s_badkb_devices[] = {
+    { "> AirPods Pro",       UI_BT_BADKB_PAYLOAD },
+    { "> AirPods Max",       UI_BT_BADKB_PAYLOAD },
+    { "> Beats Studio3",     UI_BT_BADKB_PAYLOAD },
+    { "> Galaxy Buds Pro",   UI_BT_BADKB_PAYLOAD },
+    { "> Galaxy Buds2 Pro",  UI_BT_BADKB_PAYLOAD },
+    { "> Bose QC45",         UI_BT_BADKB_PAYLOAD },
+    { "> Sony WH-1000XM5",  UI_BT_BADKB_PAYLOAD },
+    { "> JBL Flip 6",        UI_BT_BADKB_PAYLOAD },
+    { "> Logitech K380",     UI_BT_BADKB_PAYLOAD },
+    { "> Magic Keyboard",    UI_BT_BADKB_PAYLOAD },
+};
+#define BADKB_DEVICE_COUNT 10
+
+/* Bad-KB payload presets — pranks + pentesting as menu items. */
+static const menu_item_t s_badkb_payload_items[] = {
+    { "> Rickroll",          UI_BT_BADKB_ACTIVE },
+    { "> TRAPPED IN KB",     UI_BT_BADKB_ACTIVE },
+    { "> PC HACKED jk",      UI_BT_BADKB_ACTIVE },
+    { "> Fly is open",       UI_BT_BADKB_ACTIVE },
+    { "> FBI warning",       UI_BT_BADKB_ACTIVE },
+    { "> Davey Speaks",      UI_BT_BADKB_ACTIVE },
+    { "> Rickroll+Speech",   UI_BT_BADKB_ACTIVE },
+    { "> Matrix Rain",       UI_BT_BADKB_ACTIVE },
+    { "> 10 Calculators",    UI_BT_BADKB_ACTIVE },
+    { "> Lock note",         UI_BT_BADKB_ACTIVE },
+    { "> whoami",            UI_BT_BADKB_ACTIVE },
+    { "> Grab Processes",    UI_BT_BADKB_ACTIVE },
+    { "> Grab Network",      UI_BT_BADKB_ACTIVE },
+};
+#define BADKB_PAYLOAD_ITEM_COUNT 13
+
+static int s_badkb_device_idx = 0;
+static int s_badkb_payload_idx = 0;
 
 /* Bad-KB payload presets — pranks + pentesting.
  * KEY1 cycles through these. Double-tap types + Enter. */
@@ -963,6 +1001,10 @@ static void build_scanning(void)
 
 static void navigate(ui_state_t state)
 {
+    /* Save cursor position for multi-step flows. */
+    if (s_state == UI_BT_BADKB_DEVICE) s_badkb_device_idx = s_cursor;
+    if (s_state == UI_BT_BADKB_PAYLOAD) s_badkb_payload_idx = s_cursor;
+
     s_tvbg_done = false;
     s_bt_scan_done = false;
     s_salty_scanned = false;
@@ -1052,21 +1094,49 @@ static void navigate(ui_state_t state)
     case UI_BT_SPAM_MENU:
         build_menu("BLE Spam", s_bt_spam_items, BT_SPAM_ITEM_COUNT);
         break;
-    case UI_BT_BADKB:
+    case UI_BT_BADKB_DEVICE:
+        build_menu("BAD-KB: DEVICE", s_badkb_devices, BADKB_DEVICE_COUNT);
+        break;
+    case UI_BT_BADKB_PAYLOAD:
+        build_menu("BAD-KB: PAYLOAD", s_badkb_payload_items, BADKB_PAYLOAD_ITEM_COUNT);
+        break;
+    case UI_BT_BADKB_ACTIVE:
     {
         s_screen = lv_obj_create(NULL);
         lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
         lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
-        make_title_bar(s_screen, "BAD-KB");
+        make_title_bar(s_screen, "BAD-KB ATTACK");
         s_dyn_count = 0;
-        lv_obj_t *st = make_label(s_screen, 30, COL_CYAN, "Advertising...");
-        track(st);
-        lv_obj_t *pl = make_label(s_screen, 55, COL_YELLOW, "");
-        lv_label_set_text_fmt(pl, "%.18s", s_badkb_payloads[s_badkb_selected]);
-        track(pl);
-        make_label(s_screen, 90, COL_WHITE, "btn: cycle payload");
-        make_label(s_screen, 110, COL_WHITE, "2xtap: type it");
+
+        /* Show selected device + payload. */
+        const char *dev = s_badkb_device_idx < BADKB_DEVICE_COUNT
+            ? s_badkb_devices[s_badkb_device_idx].label + 2 : "???";
+        char dev_str[24];
+        snprintf(dev_str, sizeof(dev_str), "As: %s", dev);
+        make_label(s_screen, 30, COL_CYAN, dev_str);
+
+        const char *payload_name = s_badkb_payload_idx < BADKB_PAYLOAD_ITEM_COUNT
+            ? s_badkb_payload_items[s_badkb_payload_idx].label + 2 : "???";
+        char pay_str[24];
+        snprintf(pay_str, sizeof(pay_str), "Cmd: %s", payload_name);
+        make_label(s_screen, 52, COL_YELLOW, pay_str);
+
+        lv_obj_t *st = make_label(s_screen, 80, COL_WHITE, "Waiting for pair...");
+        track(st); /* 0: status */
+
+        make_label(s_screen, 115, COL_WHITE, "2xtap: send payload");
+
+        lv_obj_t *h = lv_label_create(s_screen);
+        lv_label_set_text(h, "KEY2: abort");
+        lv_obj_set_style_text_color(h, COL_WHITE, 0);
+        lv_obj_set_style_opa(h, LV_OPA_60, 0);
+        lv_obj_align(h, LV_ALIGN_BOTTOM_MID, 0, -4);
+
+        /* Start advertising as selected device. */
         if (!nesso_ble_is_ready()) nesso_ble_init();
+        /* Set the disguise index so hid_start uses the right identity. */
+        extern int s_hid_disguise_idx;
+        s_hid_disguise_idx = s_badkb_device_idx;
         nesso_ble_hid_start();
         break;
     }
@@ -1386,6 +1456,8 @@ static void handle_select(void)
     case UI_IR_MENU:
     case UI_BT_MENU:
     case UI_BT_SPAM_MENU:
+    case UI_BT_BADKB_DEVICE:
+    case UI_BT_BADKB_PAYLOAD:
     case UI_SALTY_DEEP:
     case UI_SUBGHZ_MENU:
         if (items && s_cursor < count) {
@@ -1394,9 +1466,10 @@ static void handle_select(void)
         }
         break;
 
-    case UI_BT_BADKB:
-        if (nesso_ble_hid_is_connected()) {
-            nesso_ble_hid_type(s_badkb_payloads[s_badkb_selected]);
+    case UI_BT_BADKB_ACTIVE:
+        /* Double-tap on active screen = send payload now. */
+        if (nesso_ble_hid_is_connected() && s_badkb_payload_idx < BADKB_PAYLOAD_COUNT) {
+            nesso_ble_hid_type(s_badkb_payloads[s_badkb_payload_idx]);
             nesso_ble_hid_key(HID_KEY_ENTER, HID_MOD_NONE);
         }
         break;
@@ -1503,7 +1576,9 @@ static const menu_item_t *current_menu_items(int *out_count)
     case UI_MAIN_MENU: *out_count = MAIN_ITEM_COUNT; return s_main_items;
     case UI_WIFI_MENU: *out_count = WIFI_ITEM_COUNT; return s_wifi_items;
     case UI_IR_MENU:     *out_count = IR_ITEM_COUNT;     return s_ir_items;
-    case UI_SALTY_DEEP:    *out_count = SALTY_ITEM_COUNT;    return s_salty_items;
+    case UI_BT_BADKB_DEVICE:  *out_count = BADKB_DEVICE_COUNT;       return s_badkb_devices;
+    case UI_BT_BADKB_PAYLOAD: *out_count = BADKB_PAYLOAD_ITEM_COUNT; return s_badkb_payload_items;
+    case UI_SALTY_DEEP:       *out_count = SALTY_ITEM_COUNT;          return s_salty_items;
     case UI_BT_MENU:      *out_count = BT_ITEM_COUNT;      return s_bt_items;
     case UI_BT_SPAM_MENU: *out_count = BT_SPAM_ITEM_COUNT; return s_bt_spam_items;
     case UI_SUBGHZ_MENU: *out_count = SUBGHZ_ITEM_COUNT; return s_subghz_items;
@@ -1678,16 +1753,17 @@ static void refresh_cb(lv_timer_t *t)
 #endif
         break;
     }
-    case UI_BT_BADKB:
+    case UI_BT_BADKB_ACTIVE:
         if (s_dyn_count >= 1) {
             if (nesso_ble_hid_is_connected()) {
-                lv_label_set_text(s_dyn_labels[0], "CONNECTED! Ready.");
+                static bool bk = false; bk = !bk;
+                lv_label_set_text(s_dyn_labels[0],
+                    bk ? ">> PAIRED! 2xtap GO" : "   PAIRED! 2xtap GO");
                 lv_obj_set_style_text_color(s_dyn_labels[0], COL_GREEN, 0);
             } else {
-                char status[32];
-                snprintf(status, sizeof(status), "As: %s",
-                         nesso_ble_hid_disguise_name());
-                lv_label_set_text(s_dyn_labels[0], status);
+                static bool bk2 = false; bk2 = !bk2;
+                lv_label_set_text(s_dyn_labels[0],
+                    bk2 ? "Waiting for pair..." : "Waiting for pair.  ");
                 lv_obj_set_style_text_color(s_dyn_labels[0], COL_YELLOW, 0);
             }
         }
@@ -1939,6 +2015,8 @@ static void button_task(void *arg)
             case UI_IR_MENU:
             case UI_BT_MENU:
             case UI_BT_SPAM_MENU:
+            case UI_BT_BADKB_DEVICE:
+            case UI_BT_BADKB_PAYLOAD:
             case UI_SALTY_DEEP:
             case UI_SUBGHZ_MENU:
             {
@@ -1960,12 +2038,7 @@ static void button_task(void *arg)
                 break;
             case UI_WIFI_DEAUTH_ACTIVE:
                 break;
-            case UI_BT_BADKB:
-                s_badkb_selected = (s_badkb_selected + 1) % BADKB_PAYLOAD_COUNT;
-                if (s_dyn_count >= 2)
-                    lv_label_set_text_fmt(s_dyn_labels[1], "%.18s",
-                                          s_badkb_payloads[s_badkb_selected]);
-                break;
+            /* Bad-KB scroll handled by menu system now. */
             case UI_SALTY_SCAN:
                 if (s_toy_scan.count > 0) {
                     s_cursor = (s_cursor + 1) % (int)s_toy_scan.count;
@@ -2030,9 +2103,15 @@ static void button_task(void *arg)
             case UI_BT_SCAN:
                 navigate(UI_BT_MENU);
                 break;
-            case UI_BT_BADKB:
-                nesso_ble_hid_stop();
+            case UI_BT_BADKB_DEVICE:
                 navigate(UI_BT_MENU);
+                break;
+            case UI_BT_BADKB_PAYLOAD:
+                navigate(UI_BT_BADKB_DEVICE);
+                break;
+            case UI_BT_BADKB_ACTIVE:
+                nesso_ble_hid_stop();
+                navigate(UI_BT_BADKB_DEVICE);
                 break;
             case UI_BT_FLOOD:
                 nesso_ble_flood_stop();
