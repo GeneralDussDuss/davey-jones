@@ -46,6 +46,7 @@
 #include "nesso_subghz.h"
 #include "nesso_buzzer.h"
 #include "nesso_ble.h"
+#include "nesso_sx1262.h"
 
 static const char *TAG = "nesso_ui";
 
@@ -1112,6 +1113,79 @@ static void build_scanning(void)
     lv_obj_align(msg, LV_ALIGN_CENTER, 0, 0);
 }
 
+/* -------------------- radio domain management -------------------- */
+
+typedef enum { RADIO_NONE, RADIO_WIFI, RADIO_BLE, RADIO_SUBGHZ, RADIO_ZIGBEE } radio_domain_t;
+
+static radio_domain_t s_active_radio = RADIO_NONE;
+
+static radio_domain_t state_radio(ui_state_t st)
+{
+    if (st >= UI_WIFI_MENU   && st <= UI_WIFI_PORTAL_ACTIVE) return RADIO_WIFI;
+    if (st >= UI_BT_MENU     && st <= UI_SALTY_CONTROL)      return RADIO_BLE;
+    if (st >= UI_SUBGHZ_MENU && st <= UI_SUBGHZ_LORA_CHAT)  return RADIO_SUBGHZ;
+    if (st >= UI_ZIGBEE_MENU && st <= UI_ZIGBEE_LOG)         return RADIO_ZIGBEE;
+    return RADIO_NONE;
+}
+
+static void radio_start(radio_domain_t domain)
+{
+    if (domain == s_active_radio) return;
+    /* Tear down the old domain first. */
+    switch (s_active_radio) {
+    case RADIO_WIFI:
+        nesso_eapol_stop();
+        nesso_wardrive_stop();
+        /* Don't deinit WiFi — it's cheap to keep idle. */
+        break;
+    case RADIO_BLE:
+        nesso_ble_deinit();
+        break;
+    case RADIO_SUBGHZ:
+        /* SX1262 stays powered — just stop any active ops. */
+        break;
+    case RADIO_ZIGBEE:
+        nesso_zigbee_scan_stop();
+        nesso_zigbee_log_stop();
+        break;
+    default: break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* Bring up the new domain. */
+    switch (domain) {
+    case RADIO_WIFI: {
+        nesso_wifi_init();
+        nesso_wardrive_config_t wcfg = NESSO_WARDRIVE_CONFIG_DEFAULTS();
+        wcfg.dwell_ms = 400;
+        wcfg.max_aps  = 256;
+        nesso_wardrive_start(&wcfg);
+        nesso_eapol_config_t ecfg = NESSO_EAPOL_CONFIG_DEFAULTS();
+        nesso_eapol_start(&ecfg);
+        break;
+    }
+    case RADIO_BLE:
+        nesso_ble_init();
+        break;
+    case RADIO_SUBGHZ: {
+        nesso_wifi_init(); /* needed for some ops */
+        nesso_sx1262_config_t lcfg = NESSO_SX1262_CONFIG_DEFAULTS();
+        lcfg.freq_hz = 915000000;
+        lcfg.tx_power_dbm = 14;
+        nesso_sx1262_init(&lcfg);
+        break;
+    }
+    case RADIO_ZIGBEE:
+        /* Zigbee uses 802.15.4, no WiFi needed. */
+        break;
+    default: break;
+    }
+
+    s_active_radio = domain;
+    ESP_LOGI(TAG, "radio domain → %d (heap=%lu)", domain,
+             (unsigned long)esp_get_free_heap_size());
+}
+
 /* -------------------- navigation -------------------- */
 
 static void navigate(ui_state_t state)
@@ -1130,6 +1204,12 @@ static void navigate(ui_state_t state)
     if ((s_state == UI_SUBGHZ_ANALYZER || s_state == UI_EASTER_EGG) &&
         state != UI_SUBGHZ_ANALYZER && state != UI_EASTER_EGG) {
         lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_0);
+    }
+
+    /* Lazy radio management: start/stop radios on domain transitions. */
+    radio_domain_t need = state_radio(state);
+    if (need != RADIO_NONE) {
+        radio_start(need);
     }
 
     s_state = state;
@@ -1283,7 +1363,7 @@ static void navigate(ui_state_t state)
         lv_obj_align(h, LV_ALIGN_BOTTOM_MID, 0, -4);
 
         /* Start advertising as selected device. */
-        if (!nesso_ble_is_ready()) nesso_ble_init();
+
         /* Set the disguise index so hid_start uses the right identity. */
         extern int s_hid_disguise_idx;
         s_hid_disguise_idx = s_badkb_device_idx;
@@ -1300,7 +1380,7 @@ static void navigate(ui_state_t state)
         make_label(s_screen, 30, COL_RED, "Flooding all nearby\nBLE devices...");
         lv_obj_t *cnt = make_label(s_screen, 70, COL_CYAN, "Attempts: 0");
         track(cnt);
-        if (!nesso_ble_is_ready()) nesso_ble_init();
+
         /* Flood broadcast address — hits everything. */
         uint8_t bcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
         nesso_ble_flood_start(bcast, 0);
@@ -1318,7 +1398,7 @@ static void navigate(ui_state_t state)
         lv_obj_t *cnt = make_label(s_screen, 55, COL_CYAN, "0 found");
         track(cnt); /* 1 */
 
-        if (!nesso_ble_is_ready()) nesso_ble_init();
+
         nesso_ble_tracker_start(NULL, NULL);
         nesso_buzzer_init();
         break;
@@ -1333,7 +1413,7 @@ static void navigate(ui_state_t state)
         lv_obj_t *st = make_label(s_screen, 30, COL_GREEN, "Logging to SPIFFS...");
         track(st); /* 0 */
 
-        if (!nesso_ble_is_ready()) nesso_ble_init();
+
         nesso_ble_sniff_start(NULL);
         break;
     }
@@ -1347,7 +1427,7 @@ static void navigate(ui_state_t state)
         make_label(s_screen, 30, COL_CYAN, "Broadcasting iBeacon");
         make_label(s_screen, 55, COL_YELLOW, "DAVEY-JONES-BEACON");
 
-        if (!nesso_ble_is_ready()) nesso_ble_init();
+
         const uint8_t uuid[16] = {
             0xDA, 0x7E, 0x10, 0x0E, 0x4A, 0x4F, 0x4E, 0x45,
             0x53, 0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x13, 0x37,
@@ -1401,7 +1481,7 @@ static void navigate(ui_state_t state)
         lv_obj_set_style_opa(hint, LV_OPA_60, 0);
         lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
 
-        if (!nesso_ble_is_ready()) nesso_ble_init();
+
         nesso_ble_spam_start(t);
         break;
     }
@@ -1772,7 +1852,7 @@ static void handle_select(void)
     case UI_SALTY_SCAN:
         /* Double-tap on scan results = connect to highlighted toy. */
         if (s_toy_scan.count > 0 && s_cursor < (int)s_toy_scan.count) {
-            if (!nesso_ble_is_ready()) nesso_ble_init();
+    
             esp_err_t cerr = nesso_ble_toy_connect(&s_toy_scan.toys[s_cursor]);
             if (cerr == ESP_OK && nesso_ble_toy_is_connected()) {
                 s_toy_intensity = 0;
@@ -1984,7 +2064,7 @@ static void refresh_cb(lv_timer_t *t)
     {
         if (!s_salty_scanned) {
             s_salty_scanned = true;
-            if (!nesso_ble_is_ready()) nesso_ble_init();
+    
             nesso_ble_toy_scan(5, &s_toy_scan);
             if (s_dyn_count >= 1) {
                 if (s_toy_scan.count > 0) {
@@ -2194,29 +2274,52 @@ static void refresh_cb(lv_timer_t *t)
     {
         if (!s_bt_scan_done) {
             s_bt_scan_done = true;
-            if (!nesso_ble_is_ready()) nesso_ble_init();
-            nesso_ble_scan_result_t result;
-            nesso_ble_scan(5, &result);
+            /* radio_start(RADIO_BLE) already called by navigate(). */
+            if (!nesso_ble_is_ready()) {
+                if (s_dyn_count >= 1) {
+                    lv_label_set_text_fmt(s_dyn_labels[0],
+                        "BLE INIT FAIL\nheap:%lu",
+                        (unsigned long)esp_get_free_heap_size());
+                    lv_obj_set_style_text_color(s_dyn_labels[0], COL_RED, 0);
+                }
+                break;
+            }
+            static nesso_ble_scan_result_t result;
+            memset(&result, 0, sizeof(result));
+            esp_err_t scan_rc = nesso_ble_scan(5, &result);
             if (s_dyn_count >= 1) {
-                char buf[250] = "";
+                char buf[512] = "";
                 int off = 0;
-                off += snprintf(buf, sizeof(buf), "%zu found:\n", result.count);
+                if (scan_rc != ESP_OK) {
+                    off += snprintf(buf, sizeof(buf),
+                        "SCAN FAIL rc=%d\nheap:%lu\n",
+                        (int)scan_rc, (unsigned long)esp_get_free_heap_size());
+                } else {
+                    off += snprintf(buf, sizeof(buf), "%zu found:\n", result.count);
+                }
                 for (size_t i = 0; i < result.count && i < 7; ++i) {
                     const nesso_ble_device_t *d = &result.devices[i];
-                    const char *name = d->name[0] ? d->name : d->type;
-                    /* Ultra tight: 8 char name + rssi */
-                    off += snprintf(buf + off, sizeof(buf) - off,
-                        "%.8s %d\n", name, d->rssi);
+                    if (d->name[0]) {
+                        off += snprintf(buf + off, sizeof(buf) - off,
+                            "[%s] %.8s %d\n",
+                            d->type, d->name, d->rssi);
+                    } else {
+                        off += snprintf(buf + off, sizeof(buf) - off,
+                            "[%s] %02X:%02X %d\n",
+                            d->type,
+                            d->addr[4], d->addr[5],
+                            d->rssi);
+                    }
                 }
                 if (result.count > 7)
                     snprintf(buf + off, sizeof(buf) - off, "+%zu more", result.count - 7);
-                if (result.count == 0)
+                if (result.count == 0 && scan_rc == ESP_OK)
                     snprintf(buf, sizeof(buf), "No devices found");
                 lv_label_set_text(s_dyn_labels[0], buf);
                 lv_obj_set_width(s_dyn_labels[0], 130);
                 lv_label_set_long_mode(s_dyn_labels[0], LV_LABEL_LONG_CLIP);
                 lv_obj_set_style_text_color(s_dyn_labels[0],
-                    result.count > 0 ? COL_CYAN : COL_RED, 0);
+                    scan_rc == ESP_OK && result.count > 0 ? COL_CYAN : COL_RED, 0);
             }
         }
         break;

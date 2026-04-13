@@ -39,20 +39,6 @@
 
 static const char *TAG = "davey";
 
-/* Raw promisc test — bypasses our subscriber layer entirely. */
-static volatile uint32_t s_raw_pkt_count = 0;
-static void IRAM_ATTR raw_promisc_test(void *buf, wifi_promiscuous_pkt_type_t type)
-{
-    s_raw_pkt_count++;
-    if (s_raw_pkt_count <= 5) {
-        const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
-        ESP_DRAM_LOGI("RAW", "pkt#%lu type=%d len=%d rssi=%d fc=0x%02x%02x",
-                      (unsigned long)s_raw_pkt_count, type,
-                      pkt->rx_ctrl.sig_len, pkt->rx_ctrl.rssi,
-                      pkt->payload[0], pkt->payload[1]);
-    }
-}
-
 /* Try to start a subsystem, log but don't fatal on failure. Returns true
  * on success so the caller can gate dependent subsystems. */
 #define TRY(call, name)                                                      \
@@ -89,52 +75,20 @@ void app_main(void)
         }
     }
 
-    /* ----- recon stack ----- */
-    bool wifi_ok     = TRY(nesso_wifi_init(), "wifi");
-
-    if (wifi_ok) {
-        nesso_wardrive_config_t wcfg = NESSO_WARDRIVE_CONFIG_DEFAULTS();
-        wcfg.dwell_ms = 400;
-        wcfg.max_aps  = 256;
-        TRY(nesso_wardrive_start(&wcfg), "wardrive");
-
-        nesso_eapol_config_t ecfg = NESSO_EAPOL_CONFIG_DEFAULTS();
-        TRY(nesso_eapol_start(&ecfg), "eapol");
-    }
-
-    /* ----- LoRa radio (optional) -----
-     *
-     * This soft-fails on purpose. The Nesso's SX1262 module's TCXO routing
-     * isn't verified against a schematic yet, and a wrong TCXO config will
-     * cause init to silently fail the radio. If that happens we still want
-     * WiFi + UI working, so we just log and continue. */
-    nesso_sx1262_config_t lcfg = NESSO_SX1262_CONFIG_DEFAULTS();
-    lcfg.freq_hz      = 915000000;  /* US915 default — change per region */
-    lcfg.tx_power_dbm = 14;
-    TRY(nesso_sx1262_init(&lcfg), "sx1262");
+    /* ----- radios are lazy-started by the UI when the user enters
+     * a feature menu. This keeps heap free and avoids radio conflicts.
+     * WiFi, BLE, sub-GHz, Zigbee all stay off until needed. ----- */
 
     ESP_LOGI(TAG, "=== boot complete ===");
     if (!ui_ok) {
         ESP_LOGW(TAG, "UI did not start — nothing will be visible on the LCD");
     }
 
-    /* ----- idle: log status every 10 s ----- */
+    /* ----- idle: log heap every 10 s ----- */
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10 * 1000));
-
-        nesso_wardrive_status_t ws = {0};
-        nesso_eapol_status_t    es = {0};
-        nesso_wardrive_status(&ws);
-        nesso_eapol_status(&es);
-
-        ESP_LOGI(TAG,
-                 "status: ch=%u APs=%u bcn=%lu pkts=%lu data=%lu pmkid=%lu usb=%s",
-                 ws.current_channel,
-                 (unsigned)ws.total_aps,
-                 (unsigned long)ws.beacons_parsed,
-                 (unsigned long)ws.packets_seen,
-                 (unsigned long)es.data_frames,
-                 (unsigned long)es.pmkids_captured,
+        ESP_LOGI(TAG, "heap=%lu usb=%s",
+                 (unsigned long)esp_get_free_heap_size(),
                  nesso_usb_connected() ? "Y" : "N");
     }
 }
