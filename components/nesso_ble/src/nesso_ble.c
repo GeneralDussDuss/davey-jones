@@ -859,6 +859,10 @@ esp_err_t nesso_ble_toy_connect(const nesso_ble_toy_t *toy)
     if (!s_initted || !toy) return ESP_ERR_INVALID_ARG;
     if (s_toy_connected) nesso_ble_toy_disconnect();
 
+    /* Cancel any active scan before connecting. */
+    ble_gap_disc_cancel();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     ble_addr_t addr;
     addr.type = toy->addr_type;
     memcpy(addr.val, toy->addr, 6);

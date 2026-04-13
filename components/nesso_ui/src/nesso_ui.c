@@ -138,6 +138,10 @@ static bool s_nav_back = false;
 static bool s_tvbg_done = false;
 static bool s_bt_scan_done = false;
 static bool s_salty_scanned = false;
+static bool s_cap_done = false;
+
+/* Deferred IR command — sent outside the LVGL lock by the refresh timer. */
+static uint8_t s_ir_pending = 0xFF;  /* 0xFF = no pending command */
 
 /* Beacon spam SSIDs. */
 static const char *s_spam_list[] = {
@@ -346,15 +350,14 @@ static void build_menu(const char *title, const menu_item_t *items, int count)
 
     s_cursor = 0;
     s_dyn_count = 0;
+    /* Tighter spacing for menus with many items. */
+    int spacing = count > 5 ? 20 : 26;
     for (int i = 0; i < count && i < 10; ++i) {
-        /* Each menu item is a container with padding for the highlight bg.
-         * Must NOT be clickable — otherwise it intercepts touches meant
-         * for the screen's double-tap handler. */
         lv_obj_t *row = lv_obj_create(s_screen);
         lv_obj_remove_style_all(row);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_size(row, 125, 24);
-        lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 28 + i * 26);
+        lv_obj_set_size(row, 125, spacing - 2);
+        lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 28 + i * spacing);
 
         /* Highlight background — only visible on selected item. */
         if (i == 0) {
@@ -451,7 +454,9 @@ static void build_main_menu(void)
     nesso_eapol_status_t es = {0};
     nesso_wardrive_status(&ws);
     nesso_eapol_status(&es);
-    lv_obj_t *stats = make_label(s_screen, 28 + MAIN_ITEM_COUNT * 22 + 10, COL_CYAN, "");
+    /* Stats below menu items — use dynamic spacing to avoid overlap. */
+    int stats_y = 28 + MAIN_ITEM_COUNT * (MAIN_ITEM_COUNT > 5 ? 20 : 26) + 6;
+    lv_obj_t *stats = make_label(s_screen, stats_y, COL_CYAN, "");
     lv_label_set_text_fmt(stats, "APs:%u PMK:%lu ch%u",
                           (unsigned)ws.total_aps,
                           (unsigned long)es.pmkids_captured,
@@ -922,6 +927,7 @@ static void navigate(ui_state_t state)
     s_tvbg_done = false;
     s_bt_scan_done = false;
     s_salty_scanned = false;
+    s_cap_done = false;
 
     /* Reset landscape rotation if leaving analyzer or easter egg. */
     if ((s_state == UI_SUBGHZ_ANALYZER || s_state == UI_EASTER_EGG) &&
@@ -1319,10 +1325,13 @@ static void handle_select(void)
         /* Double-tap on scan results = connect to highlighted toy. */
         if (s_toy_scan.count > 0 && s_cursor < (int)s_toy_scan.count) {
             if (!nesso_ble_is_ready()) nesso_ble_init();
-            nesso_ble_toy_connect(&s_toy_scan.toys[s_cursor]);
-            s_toy_intensity = 0;
-            s_has_pending = true;
-            s_pending_nav = UI_SALTY_CONTROL;
+            esp_err_t cerr = nesso_ble_toy_connect(&s_toy_scan.toys[s_cursor]);
+            if (cerr == ESP_OK && nesso_ble_toy_is_connected()) {
+                s_toy_intensity = 0;
+                s_has_pending = true;
+                s_pending_nav = UI_SALTY_CONTROL;
+            }
+            /* If connect failed, stay on scan screen. */
         }
         break;
 
@@ -1381,13 +1390,10 @@ static void handle_select(void)
             0x79,  /* Home / Smart Hub */
             0x58,  /* Return */
         };
+        /* Defer IR send — don't block while holding LVGL lock.
+         * The refresh timer picks this up and sends it. */
         if (s_cursor >= 0 && s_cursor < 10) {
-            if (!nesso_ir_is_ready()) nesso_ir_init();
-            nesso_ir_send_samsung(0x0707, sam_cmds[s_cursor]);
-            /* Brief LED flash as feedback. */
-            nesso_led(true);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            nesso_led(false);
+            s_ir_pending = sam_cmds[s_cursor];
         }
         break;
     }
@@ -1460,6 +1466,17 @@ static void refresh_cb(lv_timer_t *t)
         s_has_pending = false;
         navigate(s_pending_nav);
         return;
+    }
+
+    /* Deferred IR send — outside LVGL lock context. */
+    if (s_ir_pending != 0xFF) {
+        uint8_t cmd = s_ir_pending;
+        s_ir_pending = 0xFF;
+        if (!nesso_ir_is_ready()) nesso_ir_init();
+        nesso_ir_send_samsung(0x0707, cmd);
+        nesso_led(true);
+        vTaskDelay(pdMS_TO_TICKS(30));
+        nesso_led(false);
     }
 
     /* WiFi scanning auto-transition: run scan then show results. */
@@ -1709,7 +1726,6 @@ static void refresh_cb(lv_timer_t *t)
     }
     case UI_SUBGHZ_CAPTURE:
     {
-        static bool s_cap_done = false;
         if (!s_cap_done) {
             s_cap_done = true;
             esp_err_t err = nesso_subghz_capture(915000000, 5000, -70, &s_capture);

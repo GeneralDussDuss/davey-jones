@@ -51,7 +51,9 @@ esp_err_t nesso_subghz_sweep(subghz_band_t band, subghz_spectrum_t *out)
     out->rssi_peak     = -128;
     out->peak_freq_hz  = out->freq_start_hz;
 
+    if (out->freq_end_hz <= out->freq_start_hz) return ESP_ERR_INVALID_ARG;
     uint32_t step = (out->freq_end_hz - out->freq_start_hz) / SUBGHZ_SPECTRUM_POINTS;
+    if (step == 0) step = 1;
 
     /*
      * CRITICAL: the SX1262 frequency register only takes effect when
