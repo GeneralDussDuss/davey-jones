@@ -2198,19 +2198,18 @@ static void refresh_cb(lv_timer_t *t)
             nesso_ble_scan_result_t result;
             nesso_ble_scan(5, &result);
             if (s_dyn_count >= 1) {
-                char buf[300] = "";
+                char buf[250] = "";
                 int off = 0;
-                off += snprintf(buf, sizeof(buf), "%zu devices found:\n",
-                                result.count);
-                for (size_t i = 0; i < result.count && i < 8; ++i) {
+                off += snprintf(buf, sizeof(buf), "%zu found:\n", result.count);
+                for (size_t i = 0; i < result.count && i < 7; ++i) {
                     const nesso_ble_device_t *d = &result.devices[i];
-                    const char *name = d->name[0] ? d->name : "???";
+                    /* Tight format: "Name    -55" — fits 19 chars per line. */
+                    const char *name = d->name[0] ? d->name : d->type;
                     off += snprintf(buf + off, sizeof(buf) - off,
-                        "%-6s %-10.10s %d\n",
-                        d->type, name, d->rssi);
+                        "%-12.12s %d\n", name, d->rssi);
                 }
-                if (result.count > 8)
-                    snprintf(buf + off, sizeof(buf) - off, "+%zu more", result.count - 8);
+                if (result.count > 7)
+                    snprintf(buf + off, sizeof(buf) - off, "+%zu more", result.count - 7);
                 if (result.count == 0)
                     snprintf(buf, sizeof(buf), "No devices found");
                 lv_label_set_text(s_dyn_labels[0], buf);
