@@ -241,3 +241,160 @@ esp_err_t nesso_subghz_replay(const subghz_capture_t *cap)
     ESP_LOGI(TAG, "replay complete");
     return ESP_OK;
 }
+
+/* ==================== LoRa Sniffer ==================== */
+
+static lora_sniff_state_t s_lora_sniff = {0};
+static TaskHandle_t s_lora_sniff_task = NULL;
+
+static void lora_sniff_task(void *arg)
+{
+    (void)arg;
+    const void *ctx = nesso_sx1262_get_hal_ctx();
+    if (!ctx) { s_lora_sniff.running = false; vTaskDelete(NULL); return; }
+
+    /* Put radio in continuous RX. */
+    sx126x_set_rx(ctx, 0);
+    ESP_LOGI(TAG, "LoRa sniffer running");
+
+    while (s_lora_sniff.running) {
+        /* Check for RX done via IRQ status. */
+        sx126x_irq_mask_t irq = 0;
+        sx126x_get_irq_status(ctx, &irq);
+
+        if (irq & (SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR)) {
+            sx126x_clear_irq_status(ctx, irq);
+
+            /* Read the received packet. */
+            sx126x_rx_buffer_status_t bstat = {0};
+            sx126x_get_rx_buffer_status(ctx, &bstat);
+
+            sx126x_pkt_status_lora_t pstat = {0};
+            sx126x_get_lora_pkt_status(ctx, &pstat);
+
+            uint8_t len = bstat.pld_len_in_bytes;
+            if (len > 64) len = 64;
+
+            s_lora_sniff.total_seen++;
+
+            if (s_lora_sniff.count < LORA_SNIFF_MAX_PKTS) {
+                lora_sniff_pkt_t *p = &s_lora_sniff.packets[s_lora_sniff.count++];
+                p->length = len;
+                p->rssi = pstat.rssi_pkt_in_dbm;
+                p->snr = pstat.snr_pkt_in_db;
+                p->timestamp = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+
+                if (len > 0) {
+                    sx126x_read_buffer(ctx, bstat.buffer_start_pointer, p->data, len);
+                }
+
+                ESP_LOGI(TAG, "LoRa pkt: %u bytes RSSI=%d SNR=%d",
+                         len, p->rssi, p->snr);
+            }
+
+            /* Stay in RX. */
+            sx126x_set_rx(ctx, 0);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
+    s_lora_sniff_task = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t nesso_lora_sniff_start(uint32_t freq_hz, uint8_t sf, uint8_t bw)
+{
+    if (s_lora_sniff.running) return ESP_OK;
+
+    const void *ctx = nesso_sx1262_get_hal_ctx();
+    if (!ctx) return ESP_ERR_INVALID_STATE;
+
+    /* Configure radio for the requested parameters. */
+    sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
+    sx126x_set_pkt_type(ctx, SX126X_PKT_TYPE_LORA);
+    sx126x_set_rf_freq(ctx, freq_hz);
+
+    sx126x_mod_params_lora_t mp = {
+        .sf = (sx126x_lora_sf_t)sf,
+        .bw = (sx126x_lora_bw_t)bw,
+        .cr = SX126X_LORA_CR_4_5,
+        .ldro = 0,
+    };
+    sx126x_set_lora_mod_params(ctx, &mp);
+
+    /* Explicit header, max payload, CRC on. */
+    sx126x_pkt_params_lora_t pp = {
+        .preamble_len_in_symb = 8,
+        .header_type = SX126X_LORA_PKT_EXPLICIT,
+        .pld_len_in_bytes = 255,
+        .crc_is_on = true,
+        .invert_iq_is_on = false,
+    };
+    sx126x_set_lora_pkt_params(ctx, &pp);
+
+    /* IRQ on RX done + CRC error. */
+    uint16_t irq = SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR;
+    sx126x_set_dio_irq_params(ctx, irq, irq, 0, 0);
+
+    memset(&s_lora_sniff, 0, sizeof(s_lora_sniff));
+    s_lora_sniff.running = true;
+
+    BaseType_t ok = xTaskCreate(lora_sniff_task, "lora_sniff", 4096, NULL, 5, &s_lora_sniff_task);
+    if (ok != pdPASS) { s_lora_sniff.running = false; return ESP_ERR_NO_MEM; }
+
+    ESP_LOGI(TAG, "LoRa sniffer: %lu Hz SF%u BW%u", (unsigned long)freq_hz, sf, bw);
+    return ESP_OK;
+}
+
+esp_err_t nesso_lora_sniff_stop(void)
+{
+    if (!s_lora_sniff.running) return ESP_OK;
+    s_lora_sniff.running = false;
+    for (int i = 0; i < 20 && s_lora_sniff_task; ++i) vTaskDelay(pdMS_TO_TICKS(50));
+    return ESP_OK;
+}
+
+esp_err_t nesso_lora_sniff_get(lora_sniff_state_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    *out = s_lora_sniff;
+    return ESP_OK;
+}
+
+/* ==================== LoRa TX ==================== */
+
+esp_err_t nesso_lora_send(uint32_t freq_hz, const char *msg)
+{
+    if (!msg) return ESP_ERR_INVALID_ARG;
+
+    const void *ctx = nesso_sx1262_get_hal_ctx();
+    if (!ctx) return ESP_ERR_INVALID_STATE;
+
+    uint8_t len = (uint8_t)strlen(msg);
+    if (len > 200) len = 200;
+
+    sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
+    sx126x_set_pkt_type(ctx, SX126X_PKT_TYPE_LORA);
+    sx126x_set_rf_freq(ctx, freq_hz);
+
+    sx126x_pkt_params_lora_t pp = {
+        .preamble_len_in_symb = 8,
+        .header_type = SX126X_LORA_PKT_EXPLICIT,
+        .pld_len_in_bytes = len,
+        .crc_is_on = true,
+        .invert_iq_is_on = false,
+    };
+    sx126x_set_lora_pkt_params(ctx, &pp);
+
+    sx126x_set_buffer_base_address(ctx, 0x00, 0x00);
+    sx126x_write_buffer(ctx, 0x00, (const uint8_t *)msg, len);
+    sx126x_set_tx(ctx, 3000);
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+    sx126x_set_standby(ctx, SX126X_STANDBY_CFG_RC);
+
+    ESP_LOGI(TAG, "LoRa TX: %u bytes @ %lu Hz", len, (unsigned long)freq_hz);
+    return ESP_OK;
+}

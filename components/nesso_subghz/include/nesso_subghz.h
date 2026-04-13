@@ -73,6 +73,35 @@ esp_err_t nesso_subghz_load(const char *path, subghz_capture_t *out);
 /** Replay a previously captured signal. */
 esp_err_t nesso_subghz_replay(const subghz_capture_t *cap);
 
+/* -------------------- LoRa sniffer -------------------- */
+
+#define LORA_SNIFF_MAX_PKTS 16
+
+typedef struct {
+    uint8_t  data[64];
+    uint8_t  length;
+    int8_t   rssi;
+    int8_t   snr;
+    uint32_t timestamp;
+} lora_sniff_pkt_t;
+
+typedef struct {
+    lora_sniff_pkt_t packets[LORA_SNIFF_MAX_PKTS];
+    size_t   count;
+    uint32_t total_seen;
+    bool     running;
+} lora_sniff_state_t;
+
+/** Start LoRa packet sniffer at given frequency with given SF/BW. */
+esp_err_t nesso_lora_sniff_start(uint32_t freq_hz, uint8_t sf, uint8_t bw);
+esp_err_t nesso_lora_sniff_stop(void);
+esp_err_t nesso_lora_sniff_get(lora_sniff_state_t *out);
+
+/* -------------------- LoRa TX (chat / beacon) -------------------- */
+
+/** Send a LoRa text message. */
+esp_err_t nesso_lora_send(uint32_t freq_hz, const char *msg);
+
 #ifdef __cplusplus
 }
 #endif

@@ -101,6 +101,8 @@ typedef enum {
     UI_SUBGHZ_ANALYZER,
     UI_SUBGHZ_CAPTURE,
     UI_SUBGHZ_REPLAY,
+    UI_SUBGHZ_LORA_SNIFF,
+    UI_SUBGHZ_LORA_CHAT,
     UI_IR_MENU,
     UI_IR_TVBGONE,
     UI_IR_SAMSUNG_REMOTE,
@@ -573,11 +575,23 @@ static const menu_item_t s_bt_spam_items[] = {
 
 /* Sub-GHz Menu */
 static const menu_item_t s_subghz_items[] = {
-    { "> Analyzer",  UI_SUBGHZ_ANALYZER },
-    { "> Capture",   UI_SUBGHZ_CAPTURE },
-    { "> Replay",    UI_SUBGHZ_REPLAY },
+    { "> Analyzer",     UI_SUBGHZ_ANALYZER },
+    { "> LoRa Sniffer", UI_SUBGHZ_LORA_SNIFF },
+    { "> LoRa Chat",    UI_SUBGHZ_LORA_CHAT },
+    { "> Capture",      UI_SUBGHZ_CAPTURE },
+    { "> Replay",       UI_SUBGHZ_REPLAY },
 };
-#define SUBGHZ_ITEM_COUNT 3
+#define SUBGHZ_ITEM_COUNT 5
+
+/* LoRa chat messages. */
+static const char *s_lora_msgs[] = {
+    "DAVEY JONES WAS HERE",
+    "Hello from the deep",
+    "Ping!",
+    "SOS",
+};
+#define LORA_MSG_COUNT 4
+static int s_lora_msg_idx = 0;
 
 /* Sub-GHz state */
 static subghz_band_t     s_subghz_band = SUBGHZ_BAND_WIDE;
@@ -1552,6 +1566,37 @@ static void navigate(ui_state_t state)
         lv_obj_align(h, LV_ALIGN_BOTTOM_MID, 0, -4);
         break;
     }
+    case UI_SUBGHZ_LORA_SNIFF:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "LoRa SNIFFER");
+        s_dyn_count = 0;
+        lv_obj_t *st = make_label(s_screen, 30, COL_GREEN, "Listening 915MHz SF7...");
+        track(st); /* 0 */
+        lv_obj_t *cnt = make_label(s_screen, 55, COL_CYAN, "Packets: 0");
+        track(cnt); /* 1 */
+        lv_obj_t *last = make_label(s_screen, 80, COL_YELLOW, "");
+        track(last); /* 2: last packet info */
+
+        nesso_lora_sniff_start(915000000, 7, 4);  /* SF7, BW125 */
+        break;
+    }
+    case UI_SUBGHZ_LORA_CHAT:
+    {
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        make_title_bar(s_screen, "LoRa CHAT");
+        s_dyn_count = 0;
+        s_lora_msg_idx = 0;
+        lv_obj_t *msg = make_label(s_screen, 30, COL_YELLOW, s_lora_msgs[0]);
+        track(msg); /* 0: current message */
+        lv_obj_t *st = make_label(s_screen, 60, COL_CYAN, "btn:cycle 2xtap:send");
+        track(st); /* 1: status */
+        break;
+    }
     case UI_SUBGHZ_MENU:
         build_menu("Sub-GHz", s_subghz_items, SUBGHZ_ITEM_COUNT);
         break;
@@ -1807,6 +1852,12 @@ static void handle_select(void)
         }
         break;
 
+    case UI_SUBGHZ_LORA_CHAT:
+        /* Double-tap = send the selected message. */
+        nesso_lora_send(915000000, s_lora_msgs[s_lora_msg_idx]);
+        nesso_buzzer_tone(2000, 100);
+        break;
+
     case UI_SUBGHZ_ANALYZER:
         /* Double-tap cycles bands. */
         s_subghz_band = (subghz_band_t)((s_subghz_band + 1) % SUBGHZ_BAND_COUNT);
@@ -2003,6 +2054,30 @@ static void refresh_cb(lv_timer_t *t)
             }
         }
 #endif
+        break;
+    }
+    case UI_SUBGHZ_LORA_SNIFF:
+    {
+        lora_sniff_state_t ls;
+        nesso_lora_sniff_get(&ls);
+        if (s_dyn_count >= 3) {
+            static bool lb = false; lb = !lb;
+            lv_label_set_text(s_dyn_labels[0],
+                lb ? "Listening 915MHz SF7..." : "Listening 915MHz SF7.  ");
+            lv_label_set_text_fmt(s_dyn_labels[1], "Packets: %lu",
+                                  (unsigned long)ls.total_seen);
+            if (ls.count > 0) {
+                lora_sniff_pkt_t *last = &ls.packets[ls.count - 1];
+                char hex[32] = "";
+                for (int i = 0; i < last->length && i < 12; ++i)
+                    sprintf(hex + i * 2, "%02x", last->data[i]);
+                char info[48];
+                snprintf(info, sizeof(info), "%uB %ddBm %s",
+                         last->length, last->rssi, hex);
+                lv_label_set_text(s_dyn_labels[2], info);
+                lv_obj_set_style_text_color(s_dyn_labels[2], COL_GREEN, 0);
+            }
+        }
         break;
     }
     case UI_ZIGBEE_SCAN:
@@ -2327,7 +2402,11 @@ static void button_task(void *arg)
                 break;
             case UI_WIFI_DEAUTH_ACTIVE:
                 break;
-            /* Bad-KB scroll handled by menu system now. */
+            case UI_SUBGHZ_LORA_CHAT:
+                s_lora_msg_idx = (s_lora_msg_idx + 1) % LORA_MSG_COUNT;
+                if (s_dyn_count >= 1)
+                    lv_label_set_text(s_dyn_labels[0], s_lora_msgs[s_lora_msg_idx]);
+                break;
             case UI_SALTY_SCAN:
                 if (s_toy_scan.count > 0) {
                     s_cursor = (s_cursor + 1) % (int)s_toy_scan.count;
@@ -2458,6 +2537,13 @@ static void button_task(void *arg)
                 break;
             case UI_SUBGHZ_ANALYZER:
                 nesso_buzzer_off();
+                navigate(UI_SUBGHZ_MENU);
+                break;
+            case UI_SUBGHZ_LORA_SNIFF:
+                nesso_lora_sniff_stop();
+                navigate(UI_SUBGHZ_MENU);
+                break;
+            case UI_SUBGHZ_LORA_CHAT:
                 navigate(UI_SUBGHZ_MENU);
                 break;
             case UI_SUBGHZ_CAPTURE:
