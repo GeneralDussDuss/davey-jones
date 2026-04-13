@@ -80,6 +80,7 @@ typedef enum {
     UI_BT_SPAM_GOOGLE,
     UI_BT_SPAM_WINDOWS,
     UI_BT_SPAM_ALL,
+    UI_EASTER_EGG,
     UI_SUBGHZ_MENU,
     UI_SUBGHZ_ANALYZER,
     UI_SUBGHZ_CAPTURE,
@@ -259,6 +260,11 @@ static void navigate(ui_state_t state);
 
 #include "splash_img.h"
 
+#if __has_include("easter_egg_frames.h")
+#include "easter_egg_frames.h"
+#define HAS_EASTER_EGG 1
+#endif
+
 /* Splash */
 static void build_splash(void)
 {
@@ -375,8 +381,9 @@ static const menu_item_t s_main_items[] = {
     { "> Bluetooth", UI_BT_MENU },
     { "> Sub-GHz",   UI_SUBGHZ_MENU },
     { "> IR",        UI_IR_MENU },
+    { "> The Locker", UI_EASTER_EGG },
 };
-#define MAIN_ITEM_COUNT 4
+#define MAIN_ITEM_COUNT 5
 
 /* Bluetooth Menu */
 static const menu_item_t s_bt_items[] = {
@@ -901,8 +908,9 @@ static void navigate(ui_state_t state)
     s_tvbg_done = false;
     s_bt_scan_done = false;
 
-    /* Reset landscape rotation if leaving analyzer. */
-    if (s_state == UI_SUBGHZ_ANALYZER && state != UI_SUBGHZ_ANALYZER) {
+    /* Reset landscape rotation if leaving analyzer or easter egg. */
+    if ((s_state == UI_SUBGHZ_ANALYZER || s_state == UI_EASTER_EGG) &&
+        state != UI_SUBGHZ_ANALYZER && state != UI_EASTER_EGG) {
         lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_0);
     }
 
@@ -1081,6 +1089,22 @@ static void navigate(ui_state_t state)
 
         if (!nesso_ble_is_ready()) nesso_ble_init();
         nesso_ble_spam_start(t);
+        break;
+    }
+    case UI_EASTER_EGG:
+    {
+        lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_90);
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
+        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+        s_dyn_count = 0;
+
+        /* Canvas fills the landscape screen. */
+        static lv_color_t egg_cbuf[240 * 135];
+        lv_obj_t *canvas = lv_canvas_create(s_screen);
+        lv_canvas_set_buffer(canvas, egg_cbuf, 240, 135, LV_COLOR_FORMAT_RGB565);
+        lv_obj_align(canvas, LV_ALIGN_CENTER, 0, 0);
+        track(canvas); /* 0: canvas */
         break;
     }
     case UI_SUBGHZ_MENU:
@@ -1407,6 +1431,34 @@ static void refresh_cb(lv_timer_t *t)
         nesso_led(s_tvbg_rounds % 2 == 0);
         break;
     }
+    case UI_EASTER_EGG:
+    {
+#ifdef HAS_EASTER_EGG
+        if (s_dyn_count >= 1) {
+            static int egg_gif = 0, egg_frame = 0, egg_loops = 0;
+
+            const uint8_t **frames = (const uint8_t **)egg_gif0;
+            int count = EGG_GIF0_COUNT;
+#if EGG_GIF_TOTAL > 1
+            if (egg_gif == 1) { frames = (const uint8_t **)egg_gif1; count = EGG_GIF1_COUNT; }
+#endif
+            lv_obj_t *canvas = s_dyn_labels[0];
+            memcpy(lv_canvas_get_buf(canvas), frames[egg_frame], EGG_FRAME_BYTES);
+            lv_obj_invalidate(canvas);
+
+            egg_frame++;
+            if (egg_frame >= count) {
+                egg_frame = 0;
+                egg_loops++;
+                if (egg_loops >= 2) {
+                    egg_loops = 0;
+                    egg_gif = (egg_gif + 1) % EGG_GIF_TOTAL;
+                }
+            }
+        }
+#endif
+        break;
+    }
     case UI_BT_TRACKER:
     {
         nesso_ble_tracker_result_t tr;
@@ -1697,6 +1749,9 @@ static void button_task(void *arg)
             case UI_WIFI_DAVEYGOTCHI:
                 if (s_deauth_active) stop_deauth();
                 navigate(UI_WIFI_MENU);
+                break;
+            case UI_EASTER_EGG:
+                navigate(UI_MAIN_MENU);
                 break;
             case UI_BT_MENU:
                 navigate(UI_MAIN_MENU);
