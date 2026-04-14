@@ -97,11 +97,12 @@ Radios activate only when you enter their menu. Switching domains (WiFi -> BLE -
 
 | Input | Action |
 |-------|--------|
-| KEY1 (press) | Scroll down / cycle |
-| KEY1 (double-tap) | Select / confirm |
-| KEY2 | Back / stop attack |
-| Swipe right | Back (touchscreen) |
-| KEY1 (long press) | Return to main menu |
+| KEY1 (press) | Scroll / cycle through items |
+| KEY1 (long press) | Emergency stop + return to main menu |
+| KEY2 (press) | Back |
+| Touchscreen tap | Select (on menu screens) |
+| Touchscreen double-tap | Select (on non-menu screens, safety) |
+| Touchscreen swipe right | Back |
 
 ## Building
 
@@ -154,6 +155,16 @@ idf.py -p COM15 flash
 - TV-B-Gone and BLE toy scan block the LVGL timer during operation (one-shot screens, accepted tradeoff)
 - Zigbee scanning depends on nearby devices actually transmitting on the scanned channel
 - `esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT)` can corrupt NimBLE init on ESP32-C6 — we skip it entirely since C6 has no Classic BT
+
+### Troubleshooting
+
+**"WiFi menu freezes the device":** Fixed in latest — radio transitions now run on a background task. Pull and reflash.
+
+**"Build script can't find ESP-IDF":** The script auto-detects from common paths. Override with `$env:IDF_PATH = "path\to\esp-idf"` before running.
+
+**"Bad-KB won't pair":** Make sure you're entering the Bad-KB menu *before* trying to pair (lazy init needs BLE domain active). On Windows, remove the device under Settings > Bluetooth if you tried pairing while GATT services weren't registered yet.
+
+**"BLE scan shows no devices":** The device was in WiFi domain. Navigate into Bluetooth menu first — it switches domains and frees the RAM BLE needs (~60KB).
 
 ### Promiscuous WiFi Multi-Subscriber
 The WiFi layer supports up to 4 simultaneous promiscuous callbacks via a fanout system. Wardrive and EAPOL capture register as separate subscribers with independent filters, both receiving packets from the same radio. Filter mask `0` maps to `WIFI_PROMIS_FILTER_MASK_ALL` (0xFFFFFFFF), not "capture nothing."

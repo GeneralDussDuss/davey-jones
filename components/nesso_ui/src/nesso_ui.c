@@ -284,9 +284,40 @@ typedef struct { const char *label; ui_state_t target; } menu_item_t;
 static void handle_select(void);
 static const menu_item_t *current_menu_items(int *out_count);
 
+static bool state_is_menu(ui_state_t s)
+{
+    switch (s) {
+    case UI_MAIN_MENU:
+    case UI_WIFI_MENU:
+    case UI_IR_MENU:
+    case UI_BT_MENU:
+    case UI_BT_SPAM_MENU:
+    case UI_BT_BADKB_DEVICE:
+    case UI_BT_BADKB_PAYLOAD:
+    case UI_WIFI_PORTAL_MENU:
+    case UI_ZIGBEE_MENU:
+    case UI_SALTY_DEEP:
+    case UI_SUBGHZ_MENU:
+    case UI_WIFI_AP_LIST:
+    case UI_WIFI_DEAUTH_SELECT:
+    case UI_SALTY_SCAN:
+    case UI_IR_SAMSUNG_REMOTE:
+    case UI_SPLASH:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void screen_tapped(lv_event_t *e)
 {
     (void)e;
+    /* On menu screens: single tap = select.
+     * Elsewhere: keep double-tap behavior for safety. */
+    if (state_is_menu(s_state)) {
+        handle_select();
+        return;
+    }
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (s_last_tap_ms && (now - s_last_tap_ms) < DOUBLE_TAP_MS) {
         handle_select();
@@ -1118,6 +1149,8 @@ static void build_scanning(void)
 typedef enum { RADIO_NONE, RADIO_WIFI, RADIO_BLE, RADIO_SUBGHZ, RADIO_ZIGBEE } radio_domain_t;
 
 static radio_domain_t s_active_radio = RADIO_NONE;
+static volatile radio_domain_t s_pending_radio = RADIO_NONE;
+static volatile bool s_radio_transitioning = false;
 
 static radio_domain_t state_radio(ui_state_t st)
 {
@@ -1128,21 +1161,22 @@ static radio_domain_t state_radio(ui_state_t st)
     return RADIO_NONE;
 }
 
-static void radio_start(radio_domain_t domain)
+/* Background radio switcher task — never runs on the LVGL thread, so
+ * slow operations (wifi init, nimble sync) don't freeze the UI. */
+static void radio_task(void *arg)
 {
-    if (domain == s_active_radio) return;
+    radio_domain_t domain = (radio_domain_t)(intptr_t)arg;
+
     /* Tear down the old domain first. */
     switch (s_active_radio) {
     case RADIO_WIFI:
         nesso_eapol_stop();
         nesso_wardrive_stop();
-        /* Don't deinit WiFi — it's cheap to keep idle. */
         break;
     case RADIO_BLE:
         nesso_ble_deinit();
         break;
     case RADIO_SUBGHZ:
-        /* SX1262 stays powered — just stop any active ops. */
         break;
     case RADIO_ZIGBEE:
         nesso_zigbee_scan_stop();
@@ -1168,7 +1202,7 @@ static void radio_start(radio_domain_t domain)
         nesso_ble_init();
         break;
     case RADIO_SUBGHZ: {
-        nesso_wifi_init(); /* needed for some ops */
+        nesso_wifi_init();
         nesso_sx1262_config_t lcfg = NESSO_SX1262_CONFIG_DEFAULTS();
         lcfg.freq_hz = 915000000;
         lcfg.tx_power_dbm = 14;
@@ -1176,15 +1210,28 @@ static void radio_start(radio_domain_t domain)
         break;
     }
     case RADIO_ZIGBEE:
-        /* Zigbee uses 802.15.4, no WiFi needed. */
         break;
     default: break;
     }
 
     s_active_radio = domain;
+    s_radio_transitioning = false;
     ESP_LOGI(TAG, "radio domain → %d (heap=%lu)", domain,
              (unsigned long)esp_get_free_heap_size());
+    vTaskDelete(NULL);
 }
+
+static void radio_start(radio_domain_t domain)
+{
+    if (domain == s_active_radio && !s_radio_transitioning) return;
+    if (s_radio_transitioning) return;  /* already switching */
+    s_radio_transitioning = true;
+    s_pending_radio = domain;
+    xTaskCreate(radio_task, "radio_sw", 4096,
+                (void *)(intptr_t)domain, 5, NULL);
+}
+
+bool ui_radio_ready(void) { return !s_radio_transitioning; }
 
 /* -------------------- navigation -------------------- */
 
@@ -2226,6 +2273,7 @@ static void refresh_cb(lv_timer_t *t)
         break;
     case UI_BT_TRACKER:
     {
+        static size_t s_tracker_last_count = 0;
         nesso_ble_tracker_result_t tr;
         nesso_ble_tracker_get(&tr);
         if (s_dyn_count >= 2) {
@@ -2241,8 +2289,10 @@ static void refresh_cb(lv_timer_t *t)
                 }
                 lv_label_set_text(s_dyn_labels[0], buf);
                 lv_obj_set_style_text_color(s_dyn_labels[0], COL_RED, 0);
-                /* Buzzer alert! */
-                nesso_buzzer_tone(3000, 0);
+                /* Short chirp only on NEW tracker detection. */
+                if (tr.count > s_tracker_last_count) {
+                    nesso_buzzer_tone(3000, 120);
+                }
             } else {
                 static bool dot = false; dot = !dot;
                 lv_label_set_text(s_dyn_labels[0],
@@ -2250,6 +2300,7 @@ static void refresh_cb(lv_timer_t *t)
             }
             lv_label_set_text_fmt(s_dyn_labels[1], "%zu found", tr.count);
         }
+        s_tracker_last_count = tr.count;
         break;
     }
     case UI_BT_SNIFF:
