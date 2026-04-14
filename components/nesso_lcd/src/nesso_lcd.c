@@ -93,7 +93,7 @@ fail_after_io:
     esp_lcd_panel_io_del(s_io_handle);
     s_io_handle = NULL;
     nesso_lcd_reset(true);
-    return ESP_FAIL;
+    return ret != ESP_OK ? ret : ESP_FAIL;
 }
 
 esp_err_t nesso_lcd_deinit(void)

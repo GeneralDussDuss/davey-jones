@@ -478,29 +478,31 @@ static nesso_ble_tracker_result_t s_trackers = {0};
 static nesso_ble_tracker_cb_t s_tracker_cb = NULL;
 static void *s_tracker_cb_user = NULL;
 
+/* type_out is the 12-byte type field inside nesso_ble_tracker_t. */
+#define TRACKER_TYPE_SZ 12
+
 static bool is_tracker_adv(const uint8_t *data, uint8_t len, char *type_out)
 {
     /* Apple Find My / AirTag: manufacturer 0x4C00 with type 0x12. */
-    for (int i = 0; i + 5 < len; ++i) {
-        if (data[i] == 0xFF && i >= 1) {
+    for (int i = 1; i + 3 < len; ++i) {
+        if (data[i] == 0xFF) {
             if (data[i+1] == 0x4C && data[i+2] == 0x00 && data[i+3] == 0x12) {
-                strcpy(type_out, "AirTag");
+                snprintf(type_out, TRACKER_TYPE_SZ, "AirTag");
                 return true;
             }
             /* Samsung SmartTag: manufacturer 0x0075. */
             if (data[i+1] == 0x75 && data[i+2] == 0x00) {
-                /* Check for SmartTag-specific bytes. */
-                strcpy(type_out, "SmartTag");
+                snprintf(type_out, TRACKER_TYPE_SZ, "SmartTag");
                 return true;
             }
         }
     }
     /* Tile: service UUID 0xFEED or 0xFD84. */
-    for (int i = 0; i + 4 < len; ++i) {
+    for (int i = 0; i + 3 < len; ++i) {
         if (data[i] == 0x03 && data[i+1] == 0x03) {
             uint16_t uuid = data[i+2] | (data[i+3] << 8);
             if (uuid == 0xFEED || uuid == 0xFD84) {
-                strcpy(type_out, "Tile");
+                snprintf(type_out, TRACKER_TYPE_SZ, "Tile");
                 return true;
             }
         }
@@ -646,8 +648,23 @@ bool nesso_ble_clone_is_active(void) { return s_clone_running; }
 
 /* ==================== BLE SNIFFER / LOGGER ==================== */
 
+/* File I/O from a NimBLE GAP callback is unsafe — it blocks the host
+ * task and drops packets. We snapshot each event into a ring queue and
+ * let a dedicated logger task write to SPIFFS. */
+
+typedef struct {
+    uint32_t ts_ms;
+    uint8_t  addr[6];
+    uint8_t  addr_type;
+    int8_t   rssi;
+    uint8_t  data_len;
+    uint8_t  data[64];  /* truncate long adv frames */
+} sniff_rec_t;
+
 static bool s_sniff_running = false;
-static FILE *s_sniff_file = NULL;
+static QueueHandle_t s_sniff_q = NULL;
+static TaskHandle_t s_sniff_task = NULL;
+static char s_sniff_path[64] = {0};
 static uint32_t s_sniff_count = 0;
 
 static int sniff_event_cb(struct ble_gap_event *event, void *arg)
@@ -658,22 +675,51 @@ static int sniff_event_cb(struct ble_gap_event *event, void *arg)
     const struct ble_gap_disc_desc *desc = &event->disc;
     s_sniff_count++;
 
-    if (s_sniff_file) {
-        /* CSV: timestamp_ms, mac, addr_type, rssi, data_hex */
-        uint32_t ts = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-        fprintf(s_sniff_file, "%lu,%02x:%02x:%02x:%02x:%02x:%02x,%u,%d,",
-                (unsigned long)ts,
-                desc->addr.val[5], desc->addr.val[4], desc->addr.val[3],
-                desc->addr.val[2], desc->addr.val[1], desc->addr.val[0],
-                desc->addr.type, desc->rssi);
+    if (!s_sniff_q) return 0;
 
-        for (int i = 0; i < desc->length_data; ++i)
-            fprintf(s_sniff_file, "%02x", desc->data[i]);
-        fprintf(s_sniff_file, "\n");
+    sniff_rec_t rec = {
+        .ts_ms     = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .addr_type = desc->addr.type,
+        .rssi      = desc->rssi,
+        .data_len  = desc->length_data < sizeof(rec.data)
+                   ? desc->length_data : (uint8_t)sizeof(rec.data),
+    };
+    memcpy(rec.addr, desc->addr.val, 6);
+    if (desc->data && rec.data_len)
+        memcpy(rec.data, desc->data, rec.data_len);
 
-        if (s_sniff_count % 50 == 0) fflush(s_sniff_file);
-    }
+    /* Non-blocking send — drop if queue full rather than block radio task. */
+    xQueueSend(s_sniff_q, &rec, 0);
     return 0;
+}
+
+static void sniff_logger_task(void *arg)
+{
+    (void)arg;
+    FILE *f = fopen(s_sniff_path, "a");
+    if (!f) { s_sniff_task = NULL; vTaskDelete(NULL); return; }
+
+    fseek(f, 0, SEEK_END);
+    if (ftell(f) == 0) {
+        fprintf(f, "timestamp_ms,mac,addr_type,rssi,adv_data_hex\n");
+    }
+
+    sniff_rec_t rec;
+    uint32_t since_flush = 0;
+    while (s_sniff_running || uxQueueMessagesWaiting(s_sniff_q) > 0) {
+        if (xQueueReceive(s_sniff_q, &rec, pdMS_TO_TICKS(200)) != pdTRUE) continue;
+        fprintf(f, "%lu,%02x:%02x:%02x:%02x:%02x:%02x,%u,%d,",
+                (unsigned long)rec.ts_ms,
+                rec.addr[5], rec.addr[4], rec.addr[3],
+                rec.addr[2], rec.addr[1], rec.addr[0],
+                rec.addr_type, rec.rssi);
+        for (int i = 0; i < rec.data_len; ++i) fprintf(f, "%02x", rec.data[i]);
+        fprintf(f, "\n");
+        if (++since_flush >= 50) { fflush(f); since_flush = 0; }
+    }
+    fclose(f);
+    s_sniff_task = NULL;
+    vTaskDelete(NULL);
 }
 
 esp_err_t nesso_ble_sniff_start(const char *csv_path)
@@ -683,18 +729,20 @@ esp_err_t nesso_ble_sniff_start(const char *csv_path)
     if (s_spam_running) nesso_ble_spam_stop();
 
     if (!csv_path) csv_path = "/storage/ble_sniff.csv";
+    strncpy(s_sniff_path, csv_path, sizeof(s_sniff_path) - 1);
+    s_sniff_path[sizeof(s_sniff_path) - 1] = '\0';
 
-    s_sniff_file = fopen(csv_path, "a");
-    if (!s_sniff_file) return ESP_FAIL;
-
-    /* Write header if file is new. */
-    fseek(s_sniff_file, 0, SEEK_END);
-    if (ftell(s_sniff_file) == 0) {
-        fprintf(s_sniff_file, "timestamp_ms,mac,addr_type,rssi,adv_data_hex\n");
-        fflush(s_sniff_file);
-    }
+    if (!s_sniff_q) s_sniff_q = xQueueCreate(32, sizeof(sniff_rec_t));
+    if (!s_sniff_q) return ESP_ERR_NO_MEM;
 
     s_sniff_count = 0;
+    s_sniff_running = true;
+
+    if (xTaskCreate(sniff_logger_task, "ble_sniff_log", 4096, NULL, 4,
+                    &s_sniff_task) != pdPASS) {
+        s_sniff_running = false;
+        return ESP_ERR_NO_MEM;
+    }
 
     struct ble_gap_disc_params params = {
         .itvl = 0, .window = 0,
@@ -702,9 +750,11 @@ esp_err_t nesso_ble_sniff_start(const char *csv_path)
         .limited = 0, .passive = 1, .filter_duplicates = 0,
     };
     int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, 300000, &params, sniff_event_cb, NULL);
-    if (rc != 0) { fclose(s_sniff_file); s_sniff_file = NULL; return ESP_FAIL; }
+    if (rc != 0) {
+        s_sniff_running = false;
+        return ESP_FAIL;
+    }
 
-    s_sniff_running = true;
     ESP_LOGI(TAG, "BLE sniffer → %s", csv_path);
     return ESP_OK;
 }
@@ -712,9 +762,10 @@ esp_err_t nesso_ble_sniff_start(const char *csv_path)
 esp_err_t nesso_ble_sniff_stop(void)
 {
     if (!s_sniff_running) return ESP_OK;
-    ble_gap_disc_cancel();
-    if (s_sniff_file) { fflush(s_sniff_file); fclose(s_sniff_file); s_sniff_file = NULL; }
     s_sniff_running = false;
+    ble_gap_disc_cancel();
+    /* Let logger drain the queue and close the file. */
+    for (int i = 0; i < 20 && s_sniff_task; ++i) vTaskDelay(pdMS_TO_TICKS(50));
     ESP_LOGI(TAG, "BLE sniff stopped: %lu packets", (unsigned long)s_sniff_count);
     return ESP_OK;
 }
@@ -778,7 +829,6 @@ static int s_last_disguise = 0;
 int s_hid_disguise_idx = 0;  /* non-static — UI sets this before hid_start */
 static uint16_t s_hid_conn = 0;
 static uint16_t s_hid_report_handle = 0;
-static bool s_hid_svc_registered = false;
 static bool s_hid_notify_enabled = false;
 
 /* ---- HID Report Map: standard keyboard ---- */
@@ -1056,16 +1106,6 @@ static int hid_gap_cb(struct ble_gap_event *event, void *arg)
         break;
     }
     return 0;
-}
-
-static void hid_register_svcs(void)
-{
-    if (s_hid_svc_registered) return;
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-    ble_gatts_count_cfg(s_hid_svcs);
-    ble_gatts_add_svcs(s_hid_svcs);
-    s_hid_svc_registered = true;
 }
 
 esp_err_t nesso_ble_hid_start(void)

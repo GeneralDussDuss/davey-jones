@@ -482,9 +482,9 @@ static esp_err_t finalize_rx(uint8_t *out_buf, size_t out_buf_size,
                                   out_buf, len), "read buf");
     }
 
-    /* Stash for nesso_sx1262_read_last_rx(). */
-    uint8_t stash_len = (len > sizeof(s_last_rx_buf)) ? sizeof(s_last_rx_buf) : len;
-    if (stash_len && out_buf) memcpy(s_last_rx_buf, out_buf, stash_len);
+    /* Stash for nesso_sx1262_read_last_rx(). len is uint8_t (<=255)
+     * and s_last_rx_buf is 255 bytes — no extra clamp needed. */
+    if (len && out_buf) memcpy(s_last_rx_buf, out_buf, len);
 
     s_last_rx_info.length          = len;
     s_last_rx_info.rssi_dbm        = pstat.rssi_pkt_in_dbm;

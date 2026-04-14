@@ -593,7 +593,6 @@ static const char *s_badkb_payloads[] = {
     "powershell Get-NetIPAddress | Out-File $env:TEMP\\network.txt",
 };
 #define BADKB_PAYLOAD_COUNT 18
-static int s_badkb_selected = 0;
 
 /* BLE Spam submenu */
 static const menu_item_t s_bt_spam_items[] = {
@@ -1108,29 +1107,6 @@ static void refresh_daveygotchi(void)
                           (unsigned long)(uptime % 60));
 }
 
-/* Placeholder screen. */
-static void build_placeholder(const char *title)
-{
-    s_screen = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_screen, COL_BLACK, 0);
-    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
-
-    lv_obj_t *t = lv_label_create(s_screen);
-    lv_label_set_text(t, title);
-    lv_obj_set_style_text_color(t, COL_MAGENTA, 0);
-    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 4);
-
-    lv_obj_t *msg = lv_label_create(s_screen);
-    lv_label_set_text(msg, "Coming soon");
-    lv_obj_set_style_text_color(msg, COL_CYAN, 0);
-    lv_obj_align(msg, LV_ALIGN_CENTER, 0, 0);
-
-    lv_obj_t *hint = lv_label_create(s_screen);
-    lv_label_set_text(hint, "KEY2:back");
-    lv_obj_set_style_text_color(hint, COL_WHITE, 0);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
-}
-
 /* WiFi Scanning screen. */
 static void build_scanning(void)
 {
@@ -1246,6 +1222,10 @@ static void navigate(ui_state_t state)
     s_bt_scan_done = false;
     s_salty_scanned = false;
     s_cap_done = false;
+    /* Reset WiFi scan flag when leaving the scanning screen so
+     * re-entering restarts the scan if prior task still running. */
+    if (s_state == UI_WIFI_SCANNING && state != UI_WIFI_SCANNING)
+        s_wifi_scan_started = false;
 
     /* Reset landscape rotation if leaving analyzer or easter egg. */
     if ((s_state == UI_SUBGHZ_ANALYZER || s_state == UI_EASTER_EGG) &&
@@ -2197,7 +2177,8 @@ static void refresh_cb(lv_timer_t *t)
                 lora_sniff_pkt_t *last = &ls.packets[ls.count - 1];
                 char hex[32] = "";
                 for (int i = 0; i < last->length && i < 12; ++i)
-                    sprintf(hex + i * 2, "%02x", last->data[i]);
+                    snprintf(hex + i * 2, sizeof(hex) - i * 2,
+                             "%02x", last->data[i]);
                 char info[48];
                 snprintf(info, sizeof(info), "%uB %ddBm %s",
                          last->length, last->rssi, hex);
